@@ -37,6 +37,18 @@ jobs:
       # state that must never be overwritten (.env, database, media, backups).
       - name: Sync build into deploy dir
         run: |
+          set -euo pipefail
+          # Hard guard: refuse to rsync --delete into an unsafe target.
+          # An empty/relative DEPLOY_DIR would resolve to "/" and wipe the host.
+          case "${DEPLOY_DIR:-}" in
+            /|"") echo "::error::DEPLOY_DIR is empty or '/'. Aborting." >&2; exit 1 ;;
+            /*) : ;;
+            *)  echo "::error::DEPLOY_DIR must be an absolute path. Aborting." >&2; exit 1 ;;
+          esac
+          if [ ! -d "$DEPLOY_DIR" ]; then
+            echo "::error::DEPLOY_DIR '$DEPLOY_DIR' does not exist. Create it and chown it to the runner user." >&2
+            exit 1
+          fi
           rsync -a --delete \
             --exclude '.git/' \
             --exclude 'server/.env' \
