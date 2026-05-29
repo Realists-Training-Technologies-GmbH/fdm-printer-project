@@ -28,6 +28,7 @@ export interface IFileStorageService {
     folderPath?: string | null,
   ): Promise<void>;
   setFolderPath(fileStorageId: string, folderPath: string | null): Promise<void>;
+  setOriginalFileName(fileStorageId: string, originalFileName: string): Promise<void>;
   moveFilesToFolder(sourceFolderPath: string, destinationFolderPath: string | null): Promise<number>;
   loadMetadata(fileStorageId: string): Promise<any | null>;
   hasMetadata(fileStorageId: string): Promise<boolean>;
@@ -366,6 +367,31 @@ export class FileStorageService implements IFileStorageService {
       existing?._originalFileName ?? undefined,
       existing?._thumbnails ?? undefined,
       folderPath,
+    );
+  }
+
+  /**
+   * Rename a stored file by rewriting its `_originalFileName` metadata. The
+   * on-disk file is keyed by id, so only the display name changes; the folder
+   * and all other metadata are preserved.
+   */
+  async setOriginalFileName(fileStorageId: string, originalFileName: string): Promise<void> {
+    const existing = (await this.loadMetadata(fileStorageId)) ?? {};
+    const cleaned = { ...existing };
+    delete cleaned._fileHash;
+    delete cleaned._analyzedAt;
+    delete cleaned._fileStorageId;
+    delete cleaned._originalFileName;
+    delete cleaned._thumbnails;
+    delete cleaned._folderPath;
+
+    await this.saveMetadata(
+      fileStorageId,
+      cleaned,
+      existing?._fileHash ?? undefined,
+      originalFileName,
+      existing?._thumbnails ?? undefined,
+      existing?._folderPath ?? null,
     );
   }
 

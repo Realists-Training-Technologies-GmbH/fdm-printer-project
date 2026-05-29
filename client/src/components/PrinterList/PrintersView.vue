@@ -70,104 +70,71 @@
       </div>
     </v-card>
 
-    <!-- ─── Table ───────────────────────────────────────────── -->
-    <v-card elevation="0" border>
-      <v-data-table
-        v-model:expanded="expanded"
-        :headers="tableHeaders"
-        :items="printers"
-        :search="search"
-        class="elevation-1"
-        item-value="id"
-        show-expand
-      >
-        <template #no-data>
-          <div class="mt-4 mb-4">
-            <h3 v-if="printers.length === 0">
-              No printer has been created yet. Create one here:
-            </h3>
-            <h3 v-else>
-              No printer has been found. Adjust your filters or search criteria.
-            </h3>
-            <PrinterCreateAction/>
-          </div>
-        </template>
-        <template #item.enabled="{ item }">
+    <!-- ─── Printer rows ────────────────────────────────────── -->
+    <div v-if="printers.length === 0" class="pl-empty text-center py-10">
+      <v-icon size="48" color="grey-lighten-1" class="mb-3">print_disabled</v-icon>
+      <h3 class="text-subtitle-1 mb-3">
+        {{ printerStore.printers.length === 0
+          ? 'No printer has been created yet'
+          : 'No printer matches your search' }}
+      </h3>
+      <PrinterCreateAction/>
+    </div>
+
+    <div v-else class="pl-list">
+      <template v-for="printer in printers" :key="printer.id">
+        <v-card class="pl-row" elevation="0">
+          <span class="pl-row__accent" :style="stateInfoById[printer.id]?.accentStyle" />
+
           <v-switch
-            v-model="item.enabled"
+            :model-value="printer.enabled"
             color="primary"
             inset
-            @click.native.capture.stop="toggleEnabled(item)"
-          >
-            {{ item.enabled }}
-          </v-switch>
-        </template>
-        <template v-slot:item.printerType="{ item }">
-          {{ getPrinterTypeName(item.printerType) }}
-        </template>
-        <template v-slot:item.name="{ item }">
-          <v-chip>
-            {{ item.name || item.printerURL }}
-          </v-chip>
-        </template>
-        <template #item.floor="{ item }">
-          <div class="d-flex align-center ga-1">
+            hide-details
+            density="compact"
+            class="pl-row__toggle flex-shrink-0"
+            @click.stop="toggleEnabled(printer)"
+          />
+
+          <!-- Identity: name -->
+          <div class="pl-row__identity">
+            <span class="pl-row__name-text text-truncate" :title="printer.name || printer.printerURL">
+              {{ printer.name || printer.printerURL }}
+            </span>
+          </div>
+
+          <!-- Floor / Tags / Cameras (display chips only) -->
+          <div v-if="floorOfPrinter(printer.id)" class="pl-chip-group">
             <v-chip
-              v-if="floorOfPrinter(item.id)"
               closable
               size="small"
-              @click="openFloorEditDialog(floorOfPrinter(item.id)?.id)"
-              @click:close="removePrinterFromFloor(item.id)"
+              @click="openFloorEditDialog(floorOfPrinter(printer.id)?.id)"
+              @click:close="removePrinterFromFloor(printer.id)"
             >
               <v-icon start size="x-small">layers</v-icon>
-              {{ floorOfPrinter(item.id)?.name }}
+              {{ floorOfPrinter(printer.id)?.name }}
             </v-chip>
-            <span v-else class="text-caption text-medium-emphasis">
-              No floor
-            </span>
-
-            <v-menu>
-              <template #activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  size="x-small"
-                  icon
-                  variant="text"
-                >
-                  <v-icon>more_vert</v-icon>
-                </v-btn>
-              </template>
-
-              <v-list density="compact" min-width="200">
-                <v-list-item
-                  prepend-icon="grid_on"
-                  @click="goToPrinterGrid(item.id)"
-                >
-                  <v-list-item-title>
-                    {{ floorOfPrinter(item.id) ? 'View Floor Grid' : 'View Printer Grid' }}
-                  </v-list-item-title>
-                </v-list-item>
-                <v-list-item
-                  v-if="floorOfPrinter(item.id)"
-                  prepend-icon="edit"
-                  @click="openFloorEditDialog(floorOfPrinter(item.id)?.id)"
-                >
-                  <v-list-item-title>Edit Floor</v-list-item-title>
-                </v-list-item>
-                <v-list-item
-                  prepend-icon="settings"
-                  @click="goToFloorSettings()"
-                >
-                  <v-list-item-title>Floor Settings</v-list-item-title>
-                </v-list-item>
-              </v-list>
-            </v-menu>
           </div>
-        </template>
-        <template #item.cameras="{ item }">
-          <div class="d-flex align-center flex-wrap ga-1">
+
+          <div v-if="tagsOfPrinter(printer.id).length" class="pl-chip-group">
             <v-chip
-              v-for="(camera, _) in camerasOfPrinter(item.id).slice(0, 2)"
+              v-for="tag of tagsOfPrinter(printer.id)"
+              :key="tag.id"
+              :color="tag.color"
+              size="small"
+              variant="tonal"
+              closable
+              @click="openManageTagsDialogAndEdit(tag.id)"
+              @click:close="deletePrinterFromTag(tag.id, printer.id)"
+            >
+              <v-icon start size="x-small">label</v-icon>
+              {{ tag.name }}
+            </v-chip>
+          </div>
+
+          <div v-if="camerasOfPrinter(printer.id).length" class="pl-chip-group">
+            <v-chip
+              v-for="camera in camerasOfPrinter(printer.id).slice(0, 2)"
               :key="camera.id"
               size="x-small"
               variant="tonal"
@@ -178,136 +145,113 @@
               <v-icon start size="x-small">videocam</v-icon>
               {{ camera.name }}
             </v-chip>
-            <v-chip
-              v-if="camerasOfPrinter(item.id).length > 2"
-              size="x-small"
-              variant="text"
-            >
-              +{{ camerasOfPrinter(item.id).length - 2 }} more
+            <v-chip v-if="camerasOfPrinter(printer.id).length > 2" size="x-small" variant="text">
+              +{{ camerasOfPrinter(printer.id).length - 2 }}
             </v-chip>
-            <span v-if="!camerasOfPrinter(item.id).length" class="text-caption text-medium-emphasis">
-              No cameras
-            </span>
+          </div>
+
+          <!-- Status (right-aligned) -->
+          <v-chip
+            :color="stateInfoById[printer.id]?.color"
+            size="x-small"
+            variant="flat"
+            class="pl-row__state flex-shrink-0"
+          >
+            {{ stateInfoById[printer.id]?.text }}
+          </v-chip>
+
+          <!-- Actions + add-tag + add-camera -->
+          <div class="pl-row__actions">
+            <FileExplorerAction :printer="printer"/>
+            <PrinterSettingsAction :printer="printer" @update:show="openEditDialog(printer)"/>
+            <PrinterDeleteAction :printer="printer"/>
+            <PrinterMaintenanceAction :printer="printer"/>
+            <PrinterUrlAction :printer="printer"/>
+            <PrinterQuickStopAction :printer="printer"/>
+            <PrinterConnectionAction :printer="printer"/>
+            <SyncPrinterNameAction :printer="printer"/>
 
             <v-menu>
               <template #activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  :disabled="!availableCamerasForPrinter(item.id).length"
-                  size="x-small"
-                  icon
-                  variant="text"
-                >
-                  <v-icon>add</v-icon>
+                <v-btn v-bind="props" :disabled="!nonTagsOfPrinter(printer.id).length" size="small" icon variant="text">
+                  <v-icon>new_label</v-icon>
+                  <v-tooltip activator="parent" location="top">Add tag</v-tooltip>
                 </v-btn>
               </template>
+              <v-list density="compact" min-width="150">
+                <v-list-subheader>Add Tag</v-list-subheader>
+                <v-list-item v-for="(tag, index) in nonTagsOfPrinter(printer.id)" :key="index" @click="addPrinterToTag(tag.id, printer.id)">
+                  <template #prepend>
+                    <v-chip :color="tag.color" size="x-small" variant="flat" class="mr-2"><v-icon size="x-small">label</v-icon></v-chip>
+                  </template>
+                  <v-list-item-title>{{ tag.name }}</v-list-item-title>
+                </v-list-item>
+                <v-list-item v-if="!nonTagsOfPrinter(printer.id).length" disabled>
+                  <v-list-item-title class="text-caption">All tags assigned</v-list-item-title>
+                </v-list-item>
+              </v-list>
+            </v-menu>
 
+            <v-menu>
+              <template #activator="{ props }">
+                <v-btn v-bind="props" :disabled="!availableCamerasForPrinter(printer.id).length" size="small" icon variant="text">
+                  <v-icon>add_a_photo</v-icon>
+                  <v-tooltip activator="parent" location="top">Attach camera</v-tooltip>
+                </v-btn>
+              </template>
               <v-list density="compact" min-width="180">
                 <v-list-subheader>Attach Camera</v-list-subheader>
-                <v-list-item
-                  v-for="camera in availableCamerasForPrinter(item.id)"
-                  :key="camera.id"
-                  @click="attachCameraToPrinter(camera.id!, item.id)"
-                >
-                  <template v-slot:prepend>
+                <v-list-item v-for="camera in availableCamerasForPrinter(printer.id)" :key="camera.id" @click="attachCameraToPrinter(camera.id!, printer.id)">
+                  <template #prepend>
                     <v-icon class="mr-2" size="small">videocam</v-icon>
                   </template>
                   <v-list-item-title>{{ camera.name || camera.streamURL }}</v-list-item-title>
                 </v-list-item>
-                <v-list-item v-if="!availableCamerasForPrinter(item.id).length" disabled>
+                <v-list-item v-if="!availableCamerasForPrinter(printer.id).length" disabled>
                   <v-list-item-title class="text-caption">No available cameras</v-list-item-title>
                 </v-list-item>
               </v-list>
             </v-menu>
           </div>
-        </template>
-        <template #item.group="{ item }">
-          <div class="d-flex align-center flex-wrap ga-1">
-            <v-chip
-              v-for="tag of tagsOfPrinter(item.id)"
-              :key="tag.id"
-              :color="tag.color"
-              size="small"
-              variant="tonal"
-              closable
-              @click="openManageTagsDialogAndEdit(tag.id)"
-              @click:close="deletePrinterFromTag(tag.id, item.id)"
-            >
-              <v-icon start size="x-small">label</v-icon>
-              {{ tag.name }}
-            </v-chip>
 
-            <v-menu>
-              <template #activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  :disabled="!nonTagsOfPrinter(item.id).length"
-                  size="x-small"
-                  icon
-                  variant="text"
-                >
-                  <v-icon>add</v-icon>
-                </v-btn>
-              </template>
+          <!-- Floor / grid menu (three dots), before the expand dropdown -->
+          <v-menu>
+            <template #activator="{ props }">
+              <v-btn v-bind="props" icon size="small" variant="text" class="pl-row__expand flex-shrink-0">
+                <v-icon>more_vert</v-icon>
+              </v-btn>
+            </template>
+            <v-list density="compact" min-width="200">
+              <v-list-item prepend-icon="grid_on" @click="goToPrinterGrid(printer.id)">
+                <v-list-item-title>{{ floorOfPrinter(printer.id) ? 'View Floor Grid' : 'View Printer Grid' }}</v-list-item-title>
+              </v-list-item>
+              <v-list-item v-if="floorOfPrinter(printer.id)" prepend-icon="edit" @click="openFloorEditDialog(floorOfPrinter(printer.id)?.id)">
+                <v-list-item-title>Edit Floor</v-list-item-title>
+              </v-list-item>
+              <v-list-item prepend-icon="settings" @click="goToFloorSettings()">
+                <v-list-item-title>Floor Settings</v-list-item-title>
+              </v-list-item>
+            </v-list>
+          </v-menu>
 
-              <v-list density="compact" min-width="150">
-                <v-list-subheader>Add Tag</v-list-subheader>
-                <v-list-item
-                  v-for="(tag, index) in nonTagsOfPrinter(item.id)"
-                  :key="index"
-                  @click="addPrinterToTag(tag.id, item.id)"
-                >
-                  <template v-slot:prepend>
-                    <v-chip
-                      :color="tag.color"
-                      size="x-small"
-                      variant="flat"
-                      class="mr-2"
-                    >
-                      <v-icon size="x-small">label</v-icon>
-                    </v-chip>
-                  </template>
-                  <v-list-item-title>{{ tag.name }}</v-list-item-title>
-                </v-list-item>
-                <v-list-item v-if="!nonTagsOfPrinter(item.id).length" disabled>
-                  <v-list-item-title class="text-caption">All tags assigned</v-list-item-title>
-                </v-list-item>
-              </v-list>
-            </v-menu>
+          <v-btn
+            icon
+            size="small"
+            variant="text"
+            class="pl-row__expand flex-shrink-0"
+            @click.stop="toggleExpand(printer.id)"
+          >
+            <v-icon>{{ isExpanded(printer.id) ? 'expand_less' : 'expand_more' }}</v-icon>
+          </v-btn>
+        </v-card>
+
+        <v-expand-transition>
+          <div v-if="isExpanded(printer.id)" class="pl-row__details">
+            <PrinterDetails :printer="printer"/>
           </div>
-        </template>
-        <template #item.actions="{ item }">
-          <div class="d-flex align-center">
-            <!-- Core actions -->
-            <div class="d-flex ga-1">
-              <FileExplorerAction :printer="item"/>
-              <PrinterSettingsAction
-                :printer="item"
-                @update:show="openEditDialog(item)"
-              />
-              <PrinterDeleteAction :printer="item"/>
-              <PrinterMaintenanceAction :printer="item"/>
-              <PrinterUrlAction :printer="item"/>
-              <PrinterQuickStopAction :printer="item"/>
-              <PrinterConnectionAction :printer="item"/>
-              <SyncPrinterNameAction :printer="item"/>
-            </div>
-          </div>
-        </template>
-        <template #item.socketupdate="{ item }">
-          <span v-if="currentEventReceivedAt[item.id]">
-            Updated {{ diffSeconds(currentEventReceivedAt[item.id]) }} seconds
-            ago
-          </span>
-          <span v-else> No update received (silence) </span>
-        </template>
-        <template #expanded-row="{ item, columns }">
-          <td :colspan="columns.length">
-            <PrinterDetails :printer="item"/>
-          </td>
-        </template>
-      </v-data-table>
-    </v-card>
+        </v-expand-transition>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -335,8 +279,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { PrinterTagService } from '@/backend/printer-tag.service'
 import { useDialog } from '@/shared/dialog.composable'
-import { VDataTable } from 'vuetify/components'
-import { getPrinterTypeName } from '@/shared/printer-types.constants'
+import { interpretStates } from '@/shared/printer-state.constants'
 import { CameraStreamService } from '@/backend/camera-stream.service'
 import { printerTagsQueryKey } from '@/queries/printer-tags.query'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
@@ -355,25 +298,44 @@ const { tagsWithPrinters, loadTags, filterPrinters } = usePrinterFilters()
 
 const cameras = ref<any[]>([])
 
-type ReadonlyHeaders = VDataTable['$props']['headers']
-
 const search = ref('')
-const expanded = ref<string[]>([])
+const expanded = ref<number[]>([])
 
-const tableHeaders = computed(
-  () =>
-    [
-      { title: 'Enabled', key: 'enabled' },
-      { title: 'Type', key: 'printerType' },
-      { title: 'Printer Name', align: 'start', sortable: true, key: 'name' },
-      { title: 'Floor', key: 'floor', sortable: false },
-      { title: 'Tags', key: 'group', sortable: true },
-      { title: 'Cameras', key: 'cameras', sortable: false },
-      { title: 'Actions', key: 'actions', sortable: false },
-      { title: 'Socket Update', key: 'socketupdate', sortable: false },
-      { title: '', key: 'data-table-expand' }
-    ] as ReadonlyHeaders
-)
+const toggleExpand = (printerId: number) => {
+  const idx = expanded.value.indexOf(printerId)
+  if (idx === -1) expanded.value.push(printerId)
+  else expanded.value.splice(idx, 1)
+}
+
+const isExpanded = (printerId: number) => expanded.value.includes(printerId)
+
+// Map each printer's interpreted live state to a bright theme token (for the
+// row's left accent stripe and a status chip), matching the printer-grid
+// visual language. interpretStates returns muted RGBs meant for tile
+// backgrounds, so we re-map to theme colours here.
+const stateInfoById = computed<Record<number, { color: string; text: string; accentStyle: Record<string, string> }>>(() => {
+  const map: Record<number, { color: string; text: string; accentStyle: Record<string, string> }> = {}
+  for (const printer of printers.value) {
+    const events = printerStateStore.printerEventsById[printer.id]
+    const socketState = printerStateStore.socketStatesById[printer.id]
+    const s = interpretStates(printer, socketState, events)
+    let color = 'info'
+    if (!s) color = 'grey'
+    else if (s.text === 'Printing') color = 'success'
+    else if (s.text === 'Paused') color = 'warning'
+    else if (s.text === 'Operational') color = 'primary'
+    else if (s.color === 'danger') color = 'error'
+    // Disabled / offline / API-unreachable ('secondary') stay muted grey
+    // rather than the misleading "info" blue.
+    else if (s.color === 'secondary' || s.text === 'Disabled') color = 'grey'
+    map[printer.id] = {
+      color,
+      text: s?.text || 'Unknown',
+      accentStyle: color === 'grey' ? {} : { '--state-color': `rgb(var(--v-theme-${color}))` }
+    }
+  }
+  return map
+})
 
 async function loadData() {
   loading.value = true
@@ -392,18 +354,15 @@ const printerTagsQuery = useQuery({
 })
 
 const printers = computed(() => {
-  return filterPrinters(printerStore.printers)
+  const base = filterPrinters(printerStore.printers)
+  const q = search.value?.trim().toLowerCase()
+  if (!q) return base
+  return base.filter(
+    (p) =>
+      (p.name || '').toLowerCase().includes(q) ||
+      (p.printerURL || '').toLowerCase().includes(q)
+  )
 })
-
-const currentEventReceivedAt = computed(
-  () => printerStateStore.printerCurrentEventReceivedAtById
-)
-
-const diffSeconds = (timestamp: number) => {
-  if (!timestamp) return
-  const now = Date.now()
-  return (now - timestamp) / 1000
-}
 
 const tagsOfPrinter = (printerId: number) => {
   return tagsWithPrinters.value.filter((g) =>
@@ -616,6 +575,101 @@ const detachCameraFromPrinter = async (cameraId: number) => {
       min-width: 240px;
       max-width: none;
     }
+  }
+
+  /* ─── Printer rows ──────────────────────────────────────── */
+  .pl-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pl-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px 6px 16px;
+    background: rgb(var(--v-theme-surface));
+    color: rgb(var(--v-theme-on-surface));
+    border: 1px solid rgba(var(--v-theme-on-surface), 0.06);
+    overflow: hidden;
+  }
+
+  .pl-row__accent {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 4px;
+    background: var(--state-color, rgba(var(--v-theme-on-surface), 0.12));
+  }
+
+  .pl-row__toggle {
+    flex: 0 0 auto;
+  }
+
+  /* Identity: printer name */
+  .pl-row__identity {
+    display: flex;
+    align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .pl-row__name-text {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  /* Status chip, pushed to the right edge before the action icons */
+  .pl-row__state {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  .pl-chip-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+  }
+
+  .pl-row__actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+
+    /* The shared action components render as heavy elevated `bg-secondary`
+       pills (with `ms-4` spacing). In this list we want light, flat icon
+       buttons, so flatten them here without touching the shared components. */
+    .v-btn {
+      margin: 0 !important;
+      min-width: 0 !important;
+      padding: 0 8px !important;
+      background: transparent !important;
+      box-shadow: none !important;
+      color: rgba(var(--v-theme-on-surface), 0.65) !important;
+
+      &:hover {
+        background: rgba(var(--v-theme-on-surface), 0.08) !important;
+        color: rgb(var(--v-theme-on-surface)) !important;
+      }
+    }
+  }
+
+  .pl-row__expand {
+    flex: 0 0 auto;
+  }
+
+  .pl-row__details {
+    padding: 0 12px 12px 16px;
   }
 }
 </style>

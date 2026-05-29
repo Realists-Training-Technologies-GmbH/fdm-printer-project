@@ -242,8 +242,8 @@
       </v-expand-transition>
     </v-card>
 
-    <!-- Results Section - Unified Table -->
-    <v-card elevation="1">
+    <!-- ─── Results: Jobs as tiles, Queue as table ───────────── -->
+    <v-card elevation="1" class="pj-results">
       <v-card-title class="d-flex align-center py-2">
         <v-icon class="mr-2" color="primary" size="small">{{ activeTab === 'jobs' ? 'list_alt' : 'queue' }}</v-icon>
         <span class="text-subtitle-1">{{ activeTab === 'jobs' ? 'Results' : 'Queue' }}</span>
@@ -260,171 +260,211 @@
         </div>
       </v-card-title>
 
-      <v-card-text class="pa-0">
-        <v-data-table-server
-          v-model:items-per-page="currentItemsPerPage"
-          v-model:page="currentPageNumber"
-          :headers="computedHeaders"
-          :items="activeTab === 'jobs' ? filteredPrintJobs : queueItems"
-          :items-length="activeTab === 'jobs' ? totalJobs : queueCount"
-          :loading="activeTab === 'jobs' ? loading : loadingQueue"
-          :search="activeTab === 'jobs' ? searchText : ''"
-          class="print-jobs-table"
-          :loading-text="activeTab === 'jobs' ? 'Loading print jobs...' : 'Loading queue...'"
-          :no-data-text="activeTab === 'jobs' ? 'No print jobs found' : 'No jobs in queue'"
-          @update:options="handleUpdateOptions"
-        >
-          <!-- Thumbnail Column (Jobs only) -->
-          <template v-if="activeTab === 'jobs'" #item.thumbnail="{ item }">
-            <FileThumbnailCell :file-storage-id="item.fileStorageId" :thumbnails="item.thumbnails || []"/>
-          </template>
+      <!-- ─── JOBS: row list ───────────────────────────────────── -->
+      <template v-if="activeTab === 'jobs'">
+        <!-- Loading skeletons -->
+        <div v-if="loading" class="pj-list">
+          <v-skeleton-loader
+            v-for="n in 6"
+            :key="n"
+            type="list-item-avatar-two-line"
+            class="pj-job-skeleton"
+          />
+        </div>
 
-          <!-- Queue Position Column (Queue only) -->
-          <template v-if="activeTab === 'queue'" #item.queuePosition="{ item }">
-            <v-chip
-              size="small"
-              color="info"
-              variant="tonal"
-            >
+        <!-- Empty -->
+        <div v-else-if="filteredPrintJobs.length === 0" class="text-center py-10">
+          <v-icon size="48" color="grey-lighten-1" class="mb-3">work_off</v-icon>
+          <h3 class="text-subtitle-1 mb-2">No Print Jobs Found</h3>
+          <p class="text-body-2 text-medium-emphasis mb-3">
+            Try adjusting your search criteria or date range
+          </p>
+          <v-btn color="primary" size="small" prepend-icon="clear_all" @click="clearFilters">
+            Clear Filters
+          </v-btn>
+        </div>
+
+        <!-- Rows -->
+        <div v-else class="pj-list">
+          <v-card
+            v-for="job in filteredPrintJobs"
+            :key="job.id"
+            class="pj-row"
+            elevation="0"
+            @click="viewJobDetails(job)"
+          >
+            <span class="pj-row__accent" :style="jobAccentStyle(job)" />
+
+            <FileThumbnailCell
+              class="pj-row__thumb"
+              :file-storage-id="job.fileStorageId"
+              :thumbnails="job.thumbnails || []"
+              @click.stop
+            />
+
+            <!-- Primary: file name + meta -->
+            <div class="pj-row__main">
+              <div class="pj-row__name text-truncate">
+                <v-icon size="small" color="primary" class="flex-shrink-0">description</v-icon>
+                <span class="text-truncate">{{ displayFileName(job) }}</span>
+                <v-tooltip activator="parent" location="top" open-delay="400">{{ displayFileName(job) }}</v-tooltip>
+              </div>
+              <div class="pj-row__meta">
+                <span class="pj-row__meta-item">
+                  <v-icon size="14">print</v-icon>{{ job.printerName || `Printer ${ job.printerId }` }}
+                </span>
+                <span v-if="job.statistics?.actualPrintTimeSeconds" class="pj-row__meta-item">
+                  <v-icon size="14">schedule</v-icon>{{ formatDuration(job.statistics.actualPrintTimeSeconds) }}
+                </span>
+                <span v-if="jobFilamentText(job)" class="pj-row__meta-item">
+                  <v-icon size="14">fitness_center</v-icon>{{ jobFilamentText(job) }}
+                </span>
+                <span class="pj-row__meta-item pj-row__meta-item--muted">
+                  <v-icon size="14">event</v-icon>{{ formatRelativeTime(job.createdAt) }}
+                </span>
+              </div>
+            </div>
+
+            <!-- Progress (rail always reserved so status chips stay aligned) -->
+            <div class="pj-row__progress">
+              <template v-if="showProgress(job)">
+                <v-progress-linear
+                  :model-value="job.progress ?? 0"
+                  :color="getProgressColor(job.progress ?? 0)"
+                  height="5"
+                  rounded
+                />
+                <span class="text-caption text-medium-emphasis">{{ Math.round(job.progress ?? 0) }}%</span>
+              </template>
+            </div>
+
+            <!-- Status + reason -->
+            <div class="pj-row__status">
+              <v-chip
+                :color="getStatusColor(job.status)"
+                :prepend-icon="getStatusIcon(job.status)"
+                size="small"
+                variant="flat"
+                class="pj-row__chip"
+              >
+                {{ formatStatusLabel(job.status) }}
+              </v-chip>
+              <v-tooltip v-if="job.statusReason" location="top">
+                <template #activator="{ props }">
+                  <v-icon v-bind="props" color="warning" size="small">info</v-icon>
+                </template>
+                <span>{{ job.statusReason }}</span>
+              </v-tooltip>
+            </div>
+
+            <!-- Actions -->
+            <v-menu @click.stop>
+              <template #activator="{ props }">
+                <v-btn icon size="small" variant="text" class="pj-row__menu flex-shrink-0" v-bind="props" @click.stop>
+                  <v-icon>more_vert</v-icon>
+                </v-btn>
+              </template>
+              <v-list density="compact">
+                <v-list-item prepend-icon="info" title="View Details" @click="viewJobDetails(job)" />
+                <v-list-item prepend-icon="playlist_add" title="Add to Queue" :disabled="!canAddToQueue(job)" @click="handleAddToQueue(job)" />
+                <v-list-item prepend-icon="send" title="Submit to Printer" :disabled="!canSubmitToPrinter(job)" @click="submitToPrinter(job)" />
+                <v-divider />
+                <v-list-item prepend-icon="refresh" title="Re-Analyze" :disabled="!canReAnalyzeJob(job)" @click="handleReAnalyzeJob(job)" />
+                <v-list-item prepend-icon="check_circle" title="Mark as Completed" :disabled="!canMarkAsCompleted(job)" @click="handleMarkAsCompleted(job)" />
+                <v-list-item prepend-icon="error" title="Mark as Failed" :disabled="!canMarkAsFailed(job)" @click="handleMarkAsFailed(job)" />
+                <v-list-item prepend-icon="cancel" title="Mark as Cancelled" :disabled="!canMarkAsCancelled(job)" @click="handleMarkAsCancelled(job)" />
+                <v-list-item prepend-icon="help" title="Mark as Unknown" :disabled="!canMarkAsUnknown(job)" @click="handleMarkAsUnknown(job)" />
+                <v-divider />
+                <v-list-item prepend-icon="delete" title="Delete Job" class="text-error" :disabled="!canDeleteJob(job)" @click="handleDeleteJob(job)" />
+              </v-list>
+            </v-menu>
+          </v-card>
+        </div>
+
+        <!-- Pagination -->
+        <template v-if="totalJobs > 0 && filteredPrintJobs.length > 0">
+          <v-divider />
+          <div class="pj-pager">
+            <v-select
+              v-model="itemsPerPage"
+              :items="[12, 24, 48, 96]"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="pj-pager__size"
+              @update:model-value="onItemsPerPageChange"
+            />
+            <v-pagination
+              v-model="currentPage"
+              :length="totalPages"
+              :total-visible="5"
+              density="comfortable"
+              @update:model-value="loadPrintJobs"
+            />
+          </div>
+        </template>
+      </template>
+
+      <!-- ─── QUEUE: table ─────────────────────────────────────── -->
+      <v-card-text v-else class="pa-0">
+        <v-data-table-server
+          v-model:items-per-page="queuePageSize"
+          v-model:page="queueCurrentPage"
+          :headers="computedHeaders"
+          :items="queueItems"
+          :items-length="queueCount"
+          :loading="loadingQueue"
+          class="print-jobs-table"
+          loading-text="Loading queue..."
+          no-data-text="No jobs in queue"
+          @update:options="loadQueue"
+        >
+          <template #item.queuePosition="{ item }">
+            <v-chip size="small" color="info" variant="tonal">
               <v-icon start size="small">format_list_numbered</v-icon>
               Position {{ item.queuePosition }}
             </v-chip>
           </template>
 
-          <!-- Status Column -->
           <template #item.status="{ item }">
-            <v-chip
-              :color="activeTab === 'jobs' ? getStatusColor(item.status) : getQueueStatusColor(item.status)"
-              :icon="activeTab === 'jobs' ? getStatusIcon(item.status) : undefined"
-              size="small"
-              variant="elevated"
-            >
+            <v-chip :color="getQueueStatusColor(item.status)" size="small" variant="tonal">
               {{ formatStatusLabel(item.status) }}
             </v-chip>
           </template>
 
-          <!-- Created/Queued Date Column -->
           <template #item.createdAt="{ item }">
             <div class="text-body-2">
               <div>{{ formatDate(item.createdAt) }}</div>
-              <div class="text-caption text-medium-emphasis">
-                {{ formatRelativeTime(item.createdAt) }}
-              </div>
+              <div class="text-caption text-medium-emphasis">{{ formatRelativeTime(item.createdAt) }}</div>
             </div>
           </template>
 
-          <!-- Ended Date Column (Jobs only) -->
-          <template v-if="activeTab === 'jobs'" #item.endedAt="{ item }">
-            <div v-if="item.endedAt" class="text-body-2">
-              <div>{{ formatDate(item.endedAt) }}</div>
-              <div class="text-caption text-medium-emphasis">
-                {{ formatRelativeTime(item.endedAt) }}
-              </div>
-            </div>
-            <span v-else class="text-medium-emphasis">-</span>
-          </template>
-
-          <!-- Progress Column (Jobs only) -->
-          <template v-if="activeTab === 'jobs'" #item.progress="{ item }">
-            <div v-if="item.progress !== null" class="progress-container">
-              <v-progress-linear
-                :model-value="item.progress"
-                :color="getProgressColor(item.progress)"
-                height="20"
-                rounded
-                class="mb-1"
-              >
-                <template #default>
-                  <span class="text-caption font-weight-bold">
-                    {{ Math.round(item.progress) }}%
-                  </span>
-                </template>
-              </v-progress-linear>
-            </div>
-            <span v-else class="text-medium-emphasis">-</span>
-          </template>
-
-          <!-- Duration Column (Jobs only) -->
-          <template v-if="activeTab === 'jobs'" #item.duration="{ item }">
-            <div v-if="item.statistics?.actualPrintTimeSeconds" class="text-body-2">
-              <v-chip
-                :color="getDurationColor(item.statistics.actualPrintTimeSeconds)"
-                size="small"
-                variant="tonal"
-              >
-                <v-icon start size="small">schedule</v-icon>
-                {{ formatDuration(item.statistics.actualPrintTimeSeconds) }}
-              </v-chip>
-            </div>
-            <span v-else class="text-medium-emphasis">-</span>
-          </template>
-
-          <!-- Printer Name Column -->
           <template #item.printerName="{ item }">
             <div class="d-flex align-center">
               <v-avatar size="24" class="mr-2" color="primary">
                 <v-icon size="small">print</v-icon>
               </v-avatar>
               <div>
-                <div class="text-body-2 font-weight-medium">
-                  {{ item.printerName || `Printer ${ item.printerId }` }}
-                </div>
-                <div class="text-caption text-medium-emphasis" v-if="activeTab === 'jobs'">
-                  {{ getFloorName(item.printerId) }}
-                </div>
-                <div class="text-caption text-medium-emphasis" v-else>
-                  ID: {{ item.printerId }}
-                </div>
+                <div class="text-body-2 font-weight-medium">{{ item.printerName || `Printer ${ item.printerId }` }}</div>
+                <div class="text-caption text-medium-emphasis">ID: {{ item.printerId }}</div>
               </div>
             </div>
           </template>
 
-          <!-- File Name Column -->
           <template #item.fileName="{ item }">
-            <div class="d-flex align-center">
-              <v-icon class="mr-2" size="small" color="primary">description</v-icon>
-              <div>
-                <div class="text-body-2 font-weight-medium">{{ displayFileName(item) }}</div>
-                <div v-if="activeTab === 'jobs' && item.metadata?.gcodePrintTimeSeconds"
-                     class="text-caption text-medium-emphasis">
-                  Est. {{ formatDuration(item.metadata.gcodePrintTimeSeconds) }}
-                </div>
-                <div v-if="activeTab === 'queue' && item.estimatedTimeSeconds"
-                     class="text-caption text-medium-emphasis">
+            <div class="d-flex align-center file-cell">
+              <v-icon class="mr-2 flex-shrink-0" size="small" color="primary">description</v-icon>
+              <div class="file-cell__text">
+                <div class="text-body-2 font-weight-medium file-cell__name">{{ displayFileName(item) }}</div>
+                <div v-if="item.estimatedTimeSeconds" class="text-caption text-medium-emphasis">
                   Est. {{ formatDuration(item.estimatedTimeSeconds) }}
                 </div>
               </div>
             </div>
           </template>
 
-          <!-- Reason Column (Jobs only) -->
-          <template v-if="activeTab === 'jobs'" #item.reason="{ item }">
-            <v-tooltip location="top" v-if="item.statusReason">
-              <template #activator="{ props }">
-                <v-icon v-bind="props" color="warning" size="small">info</v-icon>
-              </template>
-              <span>{{ item.statusReason }}</span>
-            </v-tooltip>
-            <span v-else class="text-medium-emphasis">-</span>
-          </template>
-
-          <!-- Filament Column -->
           <template #item.filament="{ item }">
-            <div v-if="activeTab === 'jobs' && item.metadata?.filamentUsedGrams !== undefined && item.metadata?.filamentUsedGrams !== null"
-                 class="filament-info">
-              <v-chip color="green" size="small" variant="tonal">
-                <v-icon start size="small">fitness_center</v-icon>
-                <template v-if="Array.isArray(item.metadata.filamentUsedGrams)">
-                  <span v-for="(val, idx) in item.metadata.filamentUsedGrams" :key="idx">
-                    {{ val != null ? Math.round(val) : '-' }}g<span v-if="Number(idx) < item.metadata.filamentUsedGrams.length - 1">, </span>
-                  </span>
-                </template>
-                <template v-else>
-                  {{ Math.round(item.metadata.filamentUsedGrams) }}g
-                </template>
-              </v-chip>
-            </div>
-            <div v-else-if="activeTab === 'queue' && item.filamentGrams !== undefined && item.filamentGrams !== null" class="text-body-2">
+            <div v-if="item.filamentGrams !== undefined && item.filamentGrams !== null" class="text-body-2">
               <v-chip color="purple" size="small" variant="tonal">
                 <v-icon start size="small">science</v-icon>
                 <template v-if="Array.isArray(item.filamentGrams)">
@@ -432,171 +472,27 @@
                     {{ val != null ? val.toFixed(1) : '-' }}g<span v-if="Number(idx) < item.filamentGrams.length - 1">, </span>
                   </span>
                 </template>
-                <template v-else>
-                  {{ item.filamentGrams.toFixed(1) }}g
-                </template>
+                <template v-else>{{ item.filamentGrams.toFixed(1) }}g</template>
               </v-chip>
             </div>
             <span v-else class="text-medium-emphasis">-</span>
           </template>
 
-          <!-- Actions Column -->
           <template #item.actions="{ item }">
-            <!-- Queue actions -->
-            <div v-if="activeTab === 'queue'">
-              <v-btn
-                icon="send"
-                size="small"
-                variant="text"
-                color="success"
-                @click="submitToPrinter(item)"
-              >
-                <v-icon>send</v-icon>
-                <v-tooltip activator="parent" location="top">
-                  Submit to printer
-                </v-tooltip>
-              </v-btn>
-              <v-btn
-                icon="delete"
-                size="small"
-                variant="text"
-                color="error"
-                @click="removeFromQueue(item.printerId, item.jobId)"
-              >
-                <v-icon>delete</v-icon>
-                <v-tooltip activator="parent" location="top">
-                  Remove from queue
-                </v-tooltip>
-              </v-btn>
-            </div>
-            <!-- Jobs actions -->
-            <v-menu v-else>
-              <template #activator="{ props }">
-                <v-btn
-                  icon
-                  size="small"
-                  variant="text"
-                  v-bind="props"
-                >
-                  <v-icon>more_vert</v-icon>
-                </v-btn>
-              </template>
-              <v-list>
-                <v-list-item @click="viewJobDetails(item)">
-                  <template #prepend>
-                    <v-icon>info</v-icon>
-                  </template>
-                  <v-list-item-title>View Details</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="handleAddToQueue(item)"
-                  :disabled="!canAddToQueue(item)"
-                >
-                  <template #prepend>
-                    <v-icon>playlist_add</v-icon>
-                  </template>
-                  <v-list-item-title>Add to Queue</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="submitToPrinter(item)"
-                  :disabled="!canSubmitToPrinter(item)"
-                >
-                  <template #prepend>
-                    <v-icon>send</v-icon>
-                  </template>
-                  <v-list-item-title>Submit to Printer</v-list-item-title>
-                </v-list-item>
-
-                <v-divider/>
-
-                <v-list-item
-                  @click="handleReAnalyzeJob(item)"
-                  :disabled="!canReAnalyzeJob(item)"
-                >
-                  <template #prepend>
-                    <v-icon>refresh</v-icon>
-                  </template>
-                  <v-list-item-title>Re-Analyze</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="handleMarkAsCompleted(item)"
-                  :disabled="!canMarkAsCompleted(item)"
-                >
-                  <template #prepend>
-                    <v-icon>check_circle</v-icon>
-                  </template>
-                  <v-list-item-title>Mark as Completed</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="handleMarkAsFailed(item)"
-                  :disabled="!canMarkAsFailed(item)"
-                >
-                  <template #prepend>
-                    <v-icon>error</v-icon>
-                  </template>
-                  <v-list-item-title>Mark as Failed</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="handleMarkAsCancelled(item)"
-                  :disabled="!canMarkAsCancelled(item)"
-                >
-                  <template #prepend>
-                    <v-icon>cancel</v-icon>
-                  </template>
-                  <v-list-item-title>Mark as Cancelled</v-list-item-title>
-                </v-list-item>
-
-                <v-list-item
-                  @click="handleMarkAsUnknown(item)"
-                  :disabled="!canMarkAsUnknown(item)"
-                >
-                  <template #prepend>
-                    <v-icon>help</v-icon>
-                  </template>
-                  <v-list-item-title>Mark as Unknown</v-list-item-title>
-                </v-list-item>
-
-                <v-divider/>
-
-                <v-list-item
-                  @click="handleDeleteJob(item)"
-                  :disabled="!canDeleteJob(item)"
-                  class="text-error"
-                >
-                  <template #prepend>
-                    <v-icon color="error">delete</v-icon>
-                  </template>
-                  <v-list-item-title>Delete Job</v-list-item-title>
-                </v-list-item>
-              </v-list>
-            </v-menu>
+            <v-btn icon="send" size="small" variant="text" color="success" @click="submitToPrinter(item)">
+              <v-icon>send</v-icon>
+              <v-tooltip activator="parent" location="top">Submit to printer</v-tooltip>
+            </v-btn>
+            <v-btn icon="delete" size="small" variant="text" color="error" @click="removeFromQueue(item.printerId, item.jobId)">
+              <v-icon>delete</v-icon>
+              <v-tooltip activator="parent" location="top">Remove from queue</v-tooltip>
+            </v-btn>
           </template>
 
-          <!-- Loading State -->
           <template #loading>
             <v-skeleton-loader type="table-row@5"/>
           </template>
         </v-data-table-server>
-      </v-card-text>
-    </v-card>
-
-    <!-- Empty State -->
-    <v-card v-if="activeTab === 'jobs' && !loading && totalJobs === 0" class="mt-4" elevation="1">
-      <v-card-text class="text-center py-8">
-        <v-icon size="48" color="grey-lighten-1" class="mb-3">work_off</v-icon>
-        <h3 class="text-subtitle-1 mb-2">No Print Jobs Found</h3>
-        <p class="text-body-2 text-medium-emphasis mb-3">
-          Try adjusting your search criteria or date range
-        </p>
-        <v-btn color="primary" size="small" @click="clearFilters">
-          <v-icon size="small">clear_all</v-icon>
-          Clear Filters
-        </v-btn>
       </v-card-text>
     </v-card>
 
@@ -958,7 +854,6 @@ import { onMounted, ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { PrintJobService, type PrintJobDto, type PrintJobSearchPagedParams } from '@/backend/print-job.service'
 import { PrintQueueService } from '@/backend/print-queue.service'
-import { useFloorStore } from '@/store/floor.store'
 import { useDebounceFn } from '@vueuse/core'
 import { displayFileName } from '@/utils/file-name.util'
 import { useOnPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
@@ -987,7 +882,7 @@ watch(activeTab, (newTab) => {
 const printJobs = ref<PrintJobDto[]>([])
 const loading = ref(false)
 const currentPage = ref(1)
-const itemsPerPage = ref(25)
+const itemsPerPage = ref(24)
 const totalJobs = ref(0)
 
 // Queue tab state
@@ -1002,7 +897,6 @@ const { info, error } = useSnackbar()
 
 const printerStore = usePrinterStore()
 const printerStateStore = usePrinterStateStore()
-const floorStore = useFloorStore()
 
 // Dialog composables
 const jobDetailsDialog = useDialog(DialogName.PrintJobDetailsDialog)
@@ -1092,12 +986,6 @@ const searchParams = ref<PrintJobSearchPagedParams>({
   pageSize: 25
 })
 
-const searchText = computed(() => {
-  return [searchParams.value.searchPrinter, searchParams.value.searchFile]
-    .filter(Boolean)
-    .join(' ')
-})
-
 // Unique values for filters
 const availableJobStatuses = computed(() => {
   const statuses = new Set<string>()
@@ -1180,63 +1068,22 @@ const filteredPrintJobs = computed(() => {
   return filtered
 })
 
-const computedHeaders = computed(() => {
-  if (activeTab.value === 'queue') {
-    return [
-      { title: 'Position', key: 'queuePosition', sortable: false },
-      { title: 'Printer', key: 'printerName', sortable: false },
-      { title: 'File Name', key: 'fileName', sortable: false },
-      { title: 'Status', key: 'status', sortable: false },
-      { title: 'Queued At', key: 'createdAt', sortable: false },
-      { title: 'Filament', key: 'filament', sortable: false },
-      { title: 'Actions', key: 'actions', sortable: false, align: 'center' as const }
-    ]
-  } else {
-    return [
-      { title: '', key: 'thumbnail', sortable: false, width: '80px' },
-      { title: 'Printer', key: 'printerName', sortable: false },
-      { title: 'File Name', key: 'fileName', sortable: false },
-      { title: 'Status', key: 'status', sortable: false },
-      { title: 'Progress', key: 'progress', sortable: false },
-      { title: 'Started', key: 'createdAt', sortable: false },
-      { title: 'Ended', key: 'endedAt', sortable: false },
-      { title: 'Duration', key: 'duration', sortable: false },
-      { title: 'Filament', key: 'filament', sortable: false },
-      { title: 'Reason', key: 'reason', sortable: false },
-      { title: 'Actions', key: 'actions', sortable: false, align: 'center' as const }
-    ]
-  }
-})
+// Queue tab still renders as a table; the Jobs tab uses the tile grid.
+const computedHeaders = computed(() => [
+  { title: 'Position', key: 'queuePosition', sortable: false },
+  { title: 'Printer', key: 'printerName', sortable: false },
+  { title: 'File Name', key: 'fileName', sortable: false },
+  { title: 'Status', key: 'status', sortable: false },
+  { title: 'Queued At', key: 'createdAt', sortable: false },
+  { title: 'Filament', key: 'filament', sortable: false },
+  { title: 'Actions', key: 'actions', sortable: false, align: 'center' as const }
+])
 
-// Computed properties for v-model bindings (can't use ternary in v-model)
-const currentItemsPerPage = computed({
-  get: () => activeTab.value === 'jobs' ? itemsPerPage.value : queuePageSize.value,
-  set: (val) => {
-    if (activeTab.value === 'jobs') {
-      itemsPerPage.value = val
-    } else {
-      queuePageSize.value = val
-    }
-  }
-})
+const totalPages = computed(() => Math.max(1, Math.ceil(totalJobs.value / itemsPerPage.value)))
 
-const currentPageNumber = computed({
-  get: () => activeTab.value === 'jobs' ? currentPage.value : queueCurrentPage.value,
-  set: (val) => {
-    if (activeTab.value === 'jobs') {
-      currentPage.value = val
-    } else {
-      queueCurrentPage.value = val
-    }
-  }
-})
-
-const handleUpdateOptions = () => {
-  if (activeTab.value === 'jobs') {
-    loadPrintJobs()
-  } else {
-    loadQueue()
-  }
+const onItemsPerPageChange = () => {
+  currentPage.value = 1
+  loadPrintJobs()
 }
 
 const debouncedSearch = useDebounceFn(() => {
@@ -1425,6 +1272,13 @@ const getStatusIcon = (status: string | null): string => {
   }
 }
 
+// Show the inline progress bar for jobs that have a meaningful in-flight or
+// interrupted progress value. Completed jobs are implicitly 100%, so the bar
+// would be redundant noise next to the "Completed" chip.
+const showProgress = (job: PrintJobDto): boolean => {
+  return job.progress !== null && job.progress !== undefined && job.status !== 'COMPLETED'
+}
+
 const getProgressColor = (progress: number): string => {
   if (progress >= 90) return 'success'
   if (progress >= 50) return 'primary'
@@ -1432,18 +1286,38 @@ const getProgressColor = (progress: number): string => {
   return 'error'
 }
 
-const getDurationColor = (seconds: number): string => {
-  const hours = seconds / 3600
-  if (hours < 1) return 'success'
-  if (hours < 4) return 'primary'
-  if (hours < 8) return 'warning'
-  return 'error'
+// Theme tokens only (so `rgb(var(--v-theme-*))` resolves) for the tile's
+// left accent stripe. Returns undefined for unknown states so the CSS
+// fallback colour applies.
+const jobAccentVar = (status: string | null): string | undefined => {
+  switch (status) {
+    case 'COMPLETED': return 'success'
+    case 'FAILED': return 'error'
+    case 'CANCELLED':
+    case 'PAUSED': return 'warning'
+    case 'PRINTING':
+    case 'STARTING': return 'primary'
+    case 'QUEUED':
+    case 'ANALYZING':
+    case 'ANALYZED': return 'info'
+    default: return undefined
+  }
 }
 
-const getFloorName = (printerId: number | null): string => {
-  if (!printerId) return 'Unknown'
-  const floor = floorStore.floorOfPrinter(printerId)
-  return floor?.name || 'No floor assigned'
+const jobAccentStyle = (job: PrintJobDto): Record<string, string> => {
+  const token = jobAccentVar(job.status)
+  return token ? { '--state-color': `rgb(var(--v-theme-${token}))` } : {}
+}
+
+// Compact filament summary for the tile meta line, handling both the
+// single-extruder number and the multi-tool (MMU/XL) array shape.
+const jobFilamentText = (job: PrintJobDto): string | null => {
+  const grams = job.metadata?.filamentUsedGrams as number | number[] | null | undefined
+  if (grams === undefined || grams === null) return null
+  if (Array.isArray(grams)) {
+    return grams.map(v => (v != null ? Math.round(v) : '-')).join(', ') + 'g'
+  }
+  return Math.round(grams) + 'g'
 }
 
 const clearFilters = () => {
@@ -1927,12 +1801,141 @@ const cancelSubmitToPrinter = () => {
   padding-top: 8px;
 }
 
-.progress-container {
-  min-width: 120px;
+.file-cell {
+  max-width: 320px;
 }
 
-.filament-info {
-  min-width: 100px;
+.file-cell__text {
+  min-width: 0;
+}
+
+.file-cell__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Job rows (Jobs tab) ────────────────────────────────────── */
+.pj-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+}
+
+.pj-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 10px 8px 16px;
+  background: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.06);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background 0.15s ease;
+}
+
+.pj-row:hover {
+  background: rgba(var(--v-theme-primary), 0.04);
+}
+
+.pj-row__accent {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--state-color, rgba(var(--v-theme-on-surface), 0.12));
+}
+
+.pj-row__thumb {
+  flex: 0 0 auto;
+}
+
+.pj-row__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pj-row__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pj-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+}
+
+.pj-row__meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pj-row__meta-item--muted {
+  color: rgba(var(--v-theme-on-surface), 0.5);
+}
+
+.pj-row__progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 160px;
+}
+
+.pj-row__progress .v-progress-linear {
+  flex: 1 1 auto;
+}
+
+.pj-row__status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  flex: 0 0 140px;
+}
+
+.pj-row__chip {
+  min-width: 112px;
+  justify-content: flex-start;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Collapse the fixed progress/right rail on small screens */
+@media (max-width: 760px) {
+  .pj-row__progress {
+    flex-basis: 90px;
+  }
+}
+
+.pj-job-skeleton {
+  min-height: 64px;
+}
+
+/* ─── Jobs pagination footer ─────────────────────────────────── */
+.pj-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  padding: 8px 12px;
+}
+
+.pj-pager__size {
+  max-width: 96px;
 }
 
 @keyframes shimmer {

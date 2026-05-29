@@ -152,42 +152,63 @@
       </div>
     </div>
 
-    <!-- ─── Active upload progress ──────────────────────────── -->
+    <!-- ─── Upload progress (single aggregate bar while uploading) ── -->
     <v-card
-      v-if="uploadProgress.length > 0"
+      v-if="uploading && uploadProgress.length > 0"
       class="files-upload-progress"
       elevation="0"
       border
     >
       <div class="files-upload-progress__title">
         <v-icon size="small">upload</v-icon>
-        Uploading {{ uploadProgress.length }} file{{ uploadProgress.length === 1 ? '' : 's' }}
+        Uploading {{ uploadDoneCount }} / {{ uploadProgress.length }}
+        <span v-if="uploadErroredCount > 0" class="text-error ml-2">· {{ uploadErroredCount }} failed</span>
       </div>
       <v-progress-linear
-        v-for="(progress, index) in uploadProgress"
-        :key="index"
-        :model-value="progress.percent"
-        :color="progress.error ? 'error' : 'primary'"
-        height="22"
+        :model-value="uploadProgress.length ? (uploadDoneCount / uploadProgress.length) * 100 : 0"
+        color="primary"
+        height="8"
         rounded
-        class="files-upload-progress__bar"
-      >
-        <template #default>
-          <span class="text-caption font-weight-medium">
-            {{ progress.fileName }} —
-            {{ progress.error || `${progress.percent}%` }}
-          </span>
-        </template>
-      </v-progress-linear>
+      />
+      <div v-if="currentUploadName" class="files-upload-progress__current text-caption text-truncate">
+        {{ currentUploadName }}
+      </div>
+    </v-card>
+
+    <!-- ─── Upload result (persists until dismissed when there are issues) ── -->
+    <v-card
+      v-else-if="!uploading && uploadErrored.length > 0"
+      class="files-upload-progress"
+      elevation="0"
+      border
+    >
+      <div class="files-upload-progress__title">
+        <v-icon size="small" color="warning">report_problem</v-icon>
+        Upload finished — {{ uploadOkCount }} uploaded, {{ uploadErrored.length }} not uploaded
+        <v-spacer />
+        <v-btn icon size="x-small" variant="text" @click="uploadProgress = []">
+          <v-icon>close</v-icon>
+          <v-tooltip activator="parent" location="top">Dismiss</v-tooltip>
+        </v-btn>
+      </div>
+      <div class="files-upload-progress__errors">
+        <div v-for="(e, i) in uploadErrored" :key="i" class="files-upload-progress__error">
+          <v-icon size="x-small" :color="e.error === 'Already exists' ? 'warning' : 'error'" class="flex-shrink-0">
+            {{ e.error === 'Already exists' ? 'content_copy' : 'error' }}
+          </v-icon>
+          <span class="text-truncate">{{ e.fileName }}</span>
+          <span class="files-upload-progress__error-tag text-caption">{{ e.error }}</span>
+        </div>
+      </div>
     </v-card>
 
     <!-- ─── Files table ─────────────────────────────────────── -->
     <v-card elevation="0" border>
       <v-card-text class="pa-0">
         <!-- ─── Bulk action bar (shows when there's selection) ── -->
-        <div v-if="selected.length > 0" class="files-bulk-bar">
+        <div v-if="selectedCount > 0" class="files-bulk-bar">
           <v-chip color="primary" variant="flat" size="small" class="font-weight-bold">
-            {{ selected.length }} selected
+            {{ selectedCount }} selected
           </v-chip>
           <v-spacer />
           <v-btn
@@ -212,10 +233,26 @@
             variant="text"
             size="small"
             prepend-icon="close"
-            @click="selected = []"
+            @click="clearSelection()"
           >
             Clear
           </v-btn>
+        </div>
+
+        <!-- ─── Select-all header (above folders + files) ──── -->
+        <div v-if="!loading && (folders.length > 0 || paginatedFiles.length > 0)" class="fl-head">
+          <v-checkbox-btn
+            :model-value="allSelected"
+            :indeterminate="someSelected"
+            density="compact"
+            hide-details
+            class="fl-row__check"
+            @update:model-value="toggleSelectAll"
+          />
+          <span class="text-caption text-medium-emphasis">
+            <template v-if="folders.length">{{ folders.length }} {{ folders.length === 1 ? 'folder' : 'folders' }} · </template>
+            {{ filteredFiles.length }} {{ filteredFiles.length === 1 ? 'file' : 'files' }}
+          </span>
         </div>
 
         <!-- ─── Folders, vertical, merged above the file list ──── -->
@@ -229,6 +266,7 @@
             class="files-fs-row files-fs-row--up"
             @click="navigateToParent()"
           >
+            <span class="fl-row__check fl-row__check--spacer" />
             <v-icon size="20" class="files-fs-row__icon">drive_folder_upload</v-icon>
             <span class="files-fs-row__name">..</span>
             <span class="files-fs-row__type text-caption text-medium-emphasis">Parent folder</span>
@@ -239,12 +277,23 @@
             v-for="folder in folders"
             :key="folder.path"
             class="files-fs-row"
-            :class="{ 'files-fs-row--drop': isFileDragging && dragOverFolderPath === folder.path }"
+            :class="{
+              'files-fs-row--drop': isFileDragging && dragOverFolderPath === folder.path,
+              'files-fs-row--selected': isFolderSelected(folder.path),
+            }"
             @click="navigateToFolder(folder.path)"
             @dragover.prevent="onFolderDragOver(folder.path, $event)"
             @dragleave="onFolderDragLeave(folder.path)"
             @drop.prevent="onFolderDrop(folder.path)"
           >
+            <v-checkbox-btn
+              :model-value="isFolderSelected(folder.path)"
+              density="compact"
+              hide-details
+              class="fl-row__check"
+              @update:model-value="toggleFolderSelect(folder.path)"
+              @click.stop
+            />
             <v-icon size="20" class="files-fs-row__icon">folder</v-icon>
             <span class="files-fs-row__name text-truncate" :title="folder.name">
               {{ folder.name }}
@@ -270,6 +319,11 @@
                   @click="exportFolder(folder)"
                 />
                 <v-list-item
+                  prepend-icon="drive_file_move"
+                  title="Move"
+                  @click="moveFolderSingle(folder)"
+                />
+                <v-list-item
                   prepend-icon="drive_file_rename_outline"
                   title="Rename"
                   @click="openRenameFolder(folder)"
@@ -285,274 +339,119 @@
           </div>
         </div>
 
-        <v-data-table
-          v-model="selected"
-          :headers="headers"
-          :items="filteredFiles"
-          :loading="loading"
-          class="files-table"
-          loading-text="Loading files..."
-          no-data-text="No files found"
-          :items-per-page="25"
-          item-value="fileStorageId"
-          show-select
-        >
-          <template #item.thumbnail="{ item }">
-            <FileThumbnailCell :file-storage-id="item.fileStorageId" :thumbnails="item.thumbnails || []"/>
-          </template>
+        <!-- ─── Loading ──── -->
+        <div v-if="loading" class="fl-list">
+          <v-skeleton-loader v-for="n in 5" :key="n" type="list-item-avatar-two-line" />
+        </div>
 
-          <!-- File Name Column (drag source for moving between folders) -->
-          <template #item.fileName="{ item }">
+        <!-- ─── Empty ──── -->
+        <div v-else-if="filteredFiles.length === 0" class="text-center py-10">
+          <v-icon size="48" color="grey-lighten-1" class="mb-3">folder_off</v-icon>
+          <h3 class="text-subtitle-1">No files found</h3>
+        </div>
+
+        <!-- ─── File rows ──── -->
+        <div v-else class="fl-list">
+          <div
+            v-for="file in paginatedFiles"
+            :key="file.fileStorageId"
+            class="fl-row"
+            :class="{ 'fl-row--selected': isSelected(file.fileStorageId) }"
+          >
+            <span class="fl-row__accent" :style="{ '--state-color': fileFormatAccent(file.fileFormat) }" />
+
+            <v-checkbox-btn
+              :model-value="isSelected(file.fileStorageId)"
+              density="compact"
+              hide-details
+              class="fl-row__check flex-shrink-0"
+              @update:model-value="toggleSelect(file.fileStorageId)"
+              @click.stop
+            />
+
+            <FileThumbnailCell
+              class="fl-row__thumb flex-shrink-0"
+              :file-storage-id="file.fileStorageId"
+              :thumbnails="file.thumbnails || []"
+              @click.stop
+            />
+
             <div
-              class="files-row-drag"
+              class="fl-row__main"
               draggable="true"
-              @dragstart="onFileDragStart(item, $event)"
+              @dragstart="onFileDragStart(file, $event)"
               @dragend="onFileDragEnd()"
             >
-              <v-icon size="x-small" class="files-row-drag__handle">drag_indicator</v-icon>
-              <div>
-                <div class="text-body-2 font-weight-medium">
-                  {{ displayFileName(item) }}
-                </div>
-                <div class="text-caption text-medium-emphasis">
-                  {{ item.fileFormat.toUpperCase() }} •
-                  {{ formatFileSize(item.fileSize) }}
-                </div>
+              <div class="fl-row__name">
+                <v-icon size="x-small" class="fl-row__drag flex-shrink-0">drag_indicator</v-icon>
+                <span class="text-truncate" :title="displayFileName(file)">{{ displayFileName(file) }}</span>
+              </div>
+              <div class="fl-row__sub">
+                {{ file.fileFormat.toUpperCase() }} · {{ formatFileSize(file.fileSize) }} · {{ formatRelativeTime(file.createdAt) }}
               </div>
             </div>
-          </template>
 
-          <!-- Printer Type Column -->
-          <template #item.printerType="{ item }">
-            <v-avatar
-              size="32"
-              v-if="getPrinterTypeLogo(item.metadata || {}, item.fileFormat)"
-              rounded="0"
-            >
-              <v-img
-                :src="getPrinterTypeLogo(item.metadata || {}, item.fileFormat)"
-                contain
-              />
-            </v-avatar>
-            <span
-              v-else
-              class="text-medium-emphasis"
-              >-</span
-            >
-          </template>
-
-          <!-- Material Column -->
-          <template #item.material="{ item }">
-            <template v-if="item.metadata?.filamentType">
-              <template v-if="Array.isArray(item.metadata.filamentType)">
-                <v-chip
-                  v-for="(type, idx) in item.metadata.filamentType"
-                  :key="idx"
-                  size="small"
-                  variant="tonal"
-                  color="orange"
-                  class="mr-1 mb-1"
-                >
-                  {{ type }}
-                </v-chip>
-              </template>
-              <template v-else>
-                <v-chip size="small" variant="tonal" color="orange">
-                  {{ item.metadata.filamentType }}
-                </v-chip>
-              </template>
-            </template>
-            <span v-else class="text-medium-emphasis">-</span>
-          </template>
-
-          <!-- Temperatures Column -->
-          <template #item.temperatures="{ item }">
-            <div
-              v-if="
-                item.metadata?.nozzleTemperature ||
-                item.metadata?.bedTemperature
-              "
-              class="text-caption"
-            >
-              <div v-if="item.metadata.nozzleTemperature">
-                🔥 {{ item.metadata.nozzleTemperature }}°C
-              </div>
-              <div v-if="item.metadata.bedTemperature">
-                🛏️ {{ item.metadata.bedTemperature }}°C
-              </div>
-            </div>
-            <span
-              v-else
-              class="text-medium-emphasis"
-              >-</span
-            >
-          </template>
-
-          <!-- Plates Column -->
-          <template #item.plates="{ item }">
-            <v-chip
-              size="small"
-              variant="tonal"
-              color="blue"
-            >
-              <v-icon
-                start
-                size="small"
-                >layers</v-icon
-              >
-              {{ item.metadata?.totalPlates ?? 1 }}
-            </v-chip>
-          </template>
-
-          <!-- Printer Model Column -->
-          <template #item.printerModel="{ item }">
-            <div
-              v-if="item.metadata?.printerModel"
-              class="text-caption"
-            >
-              {{ item.metadata.printerModel }}
-            </div>
-            <span
-              v-else
-              class="text-medium-emphasis"
-              >-</span
-            >
-          </template>
-
-          <!-- Print Time Column -->
-          <template #item.printTime="{ item }">
-            <div
-              v-if="item.metadata?.gcodePrintTimeSeconds"
-              class="text-body-2"
-            >
-              <v-chip
-                color="info"
-                size="small"
-                variant="tonal"
-              >
-                <v-icon
-                  start
-                  size="small"
-                  >schedule</v-icon
-                >
-                {{ formatDuration(item.metadata.gcodePrintTimeSeconds) }}
+            <!-- Meta chips -->
+            <div class="fl-row__meta">
+              <v-chip v-if="file.metadata?.filamentType" size="x-small" variant="tonal" color="orange">
+                {{ Array.isArray(file.metadata.filamentType) ? file.metadata.filamentType.join(', ') : file.metadata.filamentType }}
+              </v-chip>
+              <v-chip v-if="file.metadata?.printerModel" size="x-small" variant="tonal" color="primary">
+                <v-icon start size="x-small">print</v-icon>{{ file.metadata.printerModel }}
+              </v-chip>
+              <v-chip v-if="file.metadata?.layerHeight" size="x-small" variant="tonal">
+                <v-icon start size="x-small">height</v-icon>{{ file.metadata.layerHeight }}mm
+              </v-chip>
+              <v-chip v-if="file.metadata?.gcodePrintTimeSeconds" size="x-small" variant="tonal" color="info">
+                <v-icon start size="x-small">schedule</v-icon>{{ formatDuration(file.metadata.gcodePrintTimeSeconds) }}
+              </v-chip>
+              <v-chip v-if="file.metadata?.filamentUsedGrams != null" size="x-small" variant="tonal" color="green">
+                <v-icon start size="x-small">fitness_center</v-icon>{{ fileFilamentText(file) }}
+              </v-chip>
+              <v-chip v-if="(file.metadata?.totalPlates ?? 1) > 1" size="x-small" variant="tonal" color="blue">
+                <v-icon start size="x-small">layers</v-icon>{{ file.metadata?.totalPlates }}
               </v-chip>
             </div>
-            <span
-              v-else
-              class="text-medium-emphasis"
-              >-</span
-            >
-          </template>
 
-          <!-- Filament Column -->
-          <template #item.filament="{ item }">
-            <div v-if="item.metadata?.filamentUsedGrams !== undefined && item.metadata?.filamentUsedGrams !== null" class="text-body-2">
-              <v-chip color="green" size="small" variant="tonal">
-                <v-icon start size="small">fitness_center</v-icon>
-                <template v-if="Array.isArray(item.metadata.filamentUsedGrams)">
-                  <span v-for="(val, idx) in item.metadata.filamentUsedGrams" :key="idx">
-                    {{ val != null ? val.toFixed(1) : '-' }}g<span v-if="idx < item.metadata.filamentUsedGrams.length - 1">, </span>
-                  </span>
-                </template>
-                <template v-else>
-                  {{ item.metadata.filamentUsedGrams.toFixed(1) }}g
-                </template>
-              </v-chip>
+            <!-- Actions -->
+            <div class="fl-row__actions">
+              <v-btn icon size="small" variant="text" color="primary" @click.stop="openQueueDialog(file)">
+                <v-icon>add_to_queue</v-icon>
+                <v-tooltip activator="parent" location="top">Add to queue</v-tooltip>
+              </v-btn>
+              <v-btn icon size="small" variant="text" @click.stop="openMoveDialog(file)">
+                <v-icon>drive_file_move</v-icon>
+                <v-tooltip activator="parent" location="top">Move to folder</v-tooltip>
+              </v-btn>
+              <v-btn icon size="small" variant="text" @click.stop="openRenameFile(file)">
+                <v-icon>drive_file_rename_outline</v-icon>
+                <v-tooltip activator="parent" location="top">Rename</v-tooltip>
+              </v-btn>
+              <v-btn icon size="small" variant="text" color="info" :loading="analyzingFiles.has(file.fileStorageId)" @click.stop="analyzeFile(file)">
+                <v-icon>analytics</v-icon>
+                <v-tooltip activator="parent" location="top">Trigger analysis</v-tooltip>
+              </v-btn>
+              <v-btn icon size="small" variant="text" @click.stop="viewFile(file)">
+                <v-icon>visibility</v-icon>
+                <v-tooltip activator="parent" location="top">View details</v-tooltip>
+              </v-btn>
+              <v-btn icon size="small" variant="text" color="error" @click.stop="deleteFile(file)">
+                <v-icon>delete</v-icon>
+                <v-tooltip activator="parent" location="top">Delete file</v-tooltip>
+              </v-btn>
             </div>
-            <span
-              v-else
-              class="text-medium-emphasis"
-              >-</span
-            >
-          </template>
+          </div>
+        </div>
 
-          <!-- Created Date Column -->
-          <template #item.createdAt="{ item }">
-            <div class="text-body-2">
-              <div>{{ formatDate(item.createdAt) }}</div>
-              <div class="text-caption text-medium-emphasis">
-                {{ formatRelativeTime(item.createdAt) }}
-              </div>
-            </div>
-          </template>
-
-          <!-- Actions Column -->
-          <template #item.actions="{ item }">
-            <v-btn
-              icon="add_to_queue"
-              size="small"
-              variant="text"
-              color="primary"
-              @click="openQueueDialog(item)"
-            >
-              <v-icon>add_to_queue</v-icon>
-              <v-tooltip
-                activator="parent"
-                location="top"
-              >
-                Add to queue
-              </v-tooltip>
-            </v-btn>
-            <v-btn
-              icon="drive_file_move"
-              size="small"
-              variant="text"
-              @click="openMoveDialog(item)"
-            >
-              <v-icon>drive_file_move</v-icon>
-              <v-tooltip activator="parent" location="top">
-                Move to folder
-              </v-tooltip>
-            </v-btn>
-            <v-btn
-              icon="analytics"
-              size="small"
-              variant="text"
-              color="info"
-              @click="analyzeFile(item)"
-              :loading="analyzingFiles.has(item.fileStorageId)"
-            >
-              <v-icon>analytics</v-icon>
-              <v-tooltip
-                activator="parent"
-                location="top"
-              >
-                Trigger analysis
-              </v-tooltip>
-            </v-btn>
-            <v-btn
-              icon="visibility"
-              size="small"
-              variant="text"
-              color="primary"
-              @click="viewFile(item)"
-            >
-              <v-icon>visibility</v-icon>
-              <v-tooltip
-                activator="parent"
-                location="top"
-              >
-                View details
-              </v-tooltip>
-            </v-btn>
-            <v-btn
-              icon="delete"
-              size="small"
-              variant="text"
-              color="error"
-              @click="deleteFile(item)"
-            >
-              <v-icon>delete</v-icon>
-              <v-tooltip
-                activator="parent"
-                location="top"
-              >
-                Delete file
-              </v-tooltip>
-            </v-btn>
-          </template>
-        </v-data-table>
+        <!-- ─── Pagination ──── -->
+        <div v-if="filteredFiles.length > filesPerPage" class="fl-pager">
+          <v-pagination
+            v-model="filesPage"
+            :length="filesPageCount"
+            :total-visible="5"
+            density="comfortable"
+          />
+        </div>
       </v-card-text>
     </v-card>
 
@@ -631,19 +530,12 @@
       <v-card>
         <v-card-title class="d-flex align-center ga-2 text-subtitle-1">
           <v-icon size="small">drive_file_move</v-icon>
-          Move {{ selected.length }} file(s)
+          Move {{ selectedCount }} item(s)
         </v-card-title>
         <v-card-text>
-          <v-autocomplete
-            v-model="bulkMoveDialog.targetPath"
-            :items="folderPickerItems"
-            label="Destination folder"
-            variant="outlined"
-            density="compact"
-            prepend-inner-icon="folder"
-            hide-details
-            :error-messages="bulkMoveDialog.error ? [bulkMoveDialog.error] : []"
-          />
+          <div class="text-caption text-medium-emphasis mb-2">Destination folder</div>
+          <FolderPicker v-model="bulkMoveDialog.targetPath" :folders="allFolderPaths" />
+          <div v-if="bulkMoveDialog.error" class="text-caption text-error mt-2">{{ bulkMoveDialog.error }}</div>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -678,16 +570,9 @@
             <v-icon size="small" class="mr-1">description</v-icon>
             {{ displayFileName(moveDialog.file) }}
           </div>
-          <v-autocomplete
-            v-model="moveDialog.targetPath"
-            :items="folderPickerItems"
-            label="Destination folder"
-            variant="outlined"
-            density="compact"
-            prepend-inner-icon="folder"
-            hide-details
-            :error-messages="moveDialog.error ? [moveDialog.error] : []"
-          />
+          <div class="text-caption text-medium-emphasis mb-2">Destination folder</div>
+          <FolderPicker v-model="moveDialog.targetPath" :folders="allFolderPaths" />
+          <div v-if="moveDialog.error" class="text-caption text-error mt-2">{{ moveDialog.error }}</div>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -705,11 +590,53 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- ─── Rename file dialog ──────────────────────────────── -->
+    <v-dialog
+      v-model="renameDialog.open"
+      max-width="480"
+      @keydown.esc="renameDialog.open = false"
+    >
+      <v-card>
+        <v-card-title class="d-flex align-center ga-2 text-subtitle-1">
+          <v-icon size="small">drive_file_rename_outline</v-icon>
+          Rename file
+        </v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="renameDialog.name"
+            label="File name"
+            :suffix="renameDialog.ext"
+            variant="outlined"
+            density="compact"
+            autofocus
+            hide-details="auto"
+            :error-messages="renameDialog.error ? [renameDialog.error] : []"
+            @keydown.enter="submitRename()"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="renameDialog.busy" @click="renameDialog.open = false">
+            Cancel
+          </v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="renameDialog.busy"
+            :disabled="!renameDialog.name.trim()"
+            @click="submitRename()"
+          >
+            Rename
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-container>
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, reactive, watch } from 'vue'
 import {
   FileStorageService,
   type FileMetadata,
@@ -720,10 +647,10 @@ import { useSnackbar } from '@/shared/snackbar.composable'
 import { formatFileSize } from '@/utils/file-size.util'
 import { displayFileName } from '@/utils/file-name.util'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
-import { formatDate, formatRelativeTime, formatDuration } from '@/utils/date-time.utils'
-import { getPrinterTypeLogo } from '@/shared/printer-types.constants'
+import { formatRelativeTime, formatDuration } from '@/utils/date-time.utils'
 import FileDetailsDialog from './FileDetailsDialog.vue'
 import QueueFileDialog from './QueueFileDialog.vue'
+import FolderPicker from './FolderPicker.vue'
 
 const snackbar = useSnackbar()
 const printerStore = usePrinterStore()
@@ -772,6 +699,22 @@ const moveDialog = reactive<{
   error: null
 })
 
+const renameDialog = reactive<{
+  open: boolean
+  file: FileMetadata | null
+  name: string
+  ext: string
+  busy: boolean
+  error: string | null
+}>({
+  open: false,
+  file: null,
+  name: '',
+  ext: '',
+  busy: false,
+  error: null
+})
+
 const selected = ref<string[]>([])
 const bulkDeleting = ref(false)
 
@@ -797,19 +740,23 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const folderInput = ref<HTMLInputElement | null>(null)
 const analyzingFiles = ref<Set<string>>(new Set())
 
-const headers = [
-  { title: '', key: 'thumbnail', sortable: false, width: '80px' },
-  { title: 'File Name', key: 'fileName', sortable: true },
-  { title: 'Type', key: 'printerType', sortable: false },
-  { title: 'Material', key: 'material', sortable: false },
-  { title: 'Temps', key: 'temperatures', sortable: false },
-  { title: 'Plates', key: 'plates', sortable: false },
-  { title: 'Model', key: 'printerModel', sortable: false },
-  { title: 'Print Time', key: 'printTime', sortable: false },
-  { title: 'Filament', key: 'filament', sortable: false },
-  { title: 'Created', key: 'createdAt', sortable: true },
-  { title: 'Actions', key: 'actions', sortable: false, align: 'end' as const }
-]
+// Aggregate upload progress (one bar for the whole batch instead of one per
+// file) and a persistent error list so results don't vanish on big uploads.
+const uploadDoneCount = computed(() => uploadProgress.value.filter((p) => p.percent === 100).length)
+const uploadErrored = computed(() => uploadProgress.value.filter((p) => p.error))
+const uploadErroredCount = computed(() => uploadErrored.value.length)
+const uploadOkCount = computed(() => uploadProgress.value.filter((p) => p.percent === 100 && !p.error).length)
+const currentUploadName = computed(() => uploadProgress.value.find((p) => p.percent < 100)?.fileName ?? '')
+
+// Auto-dismiss the progress card only when everything succeeded; otherwise
+// keep the result (with the error list) until the user closes it.
+const maybeClearUpload = () => {
+  if (uploadProgress.value.every((p) => !p.error)) {
+    setTimeout(() => {
+      uploadProgress.value = []
+    }, 1500)
+  }
+}
 
 const totalCount = computed(() => files.value.length)
 
@@ -826,6 +773,81 @@ const filteredFiles = computed(() => {
       file.fileStorageId.toLowerCase().includes(query)
   )
 })
+
+// ─── File row list: pagination + selection ──────────────────────
+const filesPage = ref(1)
+const filesPerPage = ref(25)
+const filesPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredFiles.value.length / filesPerPage.value))
+)
+const paginatedFiles = computed(() => {
+  const start = (filesPage.value - 1) * filesPerPage.value
+  return filteredFiles.value.slice(start, start + filesPerPage.value)
+})
+watch([filteredFiles, filesPerPage], () => {
+  filesPage.value = 1
+})
+
+// Selection spans both files (by storage id) and folders (by path).
+const selectedFolders = ref<string[]>([])
+const isSelected = (id: string) => selected.value.includes(id)
+const toggleSelect = (id: string) => {
+  const i = selected.value.indexOf(id)
+  if (i === -1) selected.value.push(id)
+  else selected.value.splice(i, 1)
+}
+const isFolderSelected = (path: string) => selectedFolders.value.includes(path)
+const toggleFolderSelect = (path: string) => {
+  const i = selectedFolders.value.indexOf(path)
+  if (i === -1) selectedFolders.value.push(path)
+  else selectedFolders.value.splice(i, 1)
+}
+
+const selectedCount = computed(() => selected.value.length + selectedFolders.value.length)
+
+const allSelected = computed(() => {
+  const total = folders.value.length + filteredFiles.value.length
+  return (
+    total > 0 &&
+    selectedFolders.value.length === folders.value.length &&
+    filteredFiles.value.every((f) => selected.value.includes(f.fileStorageId))
+  )
+})
+const someSelected = computed(() => selectedCount.value > 0 && !allSelected.value)
+
+const toggleSelectAll = () => {
+  if (allSelected.value) {
+    clearSelection()
+  } else {
+    selected.value = filteredFiles.value.map((f) => f.fileStorageId)
+    selectedFolders.value = folders.value.map((f) => f.path)
+  }
+}
+
+const clearSelection = () => {
+  selected.value = []
+  selectedFolders.value = []
+}
+
+// Left accent stripe colour per file format, matching the grid/queue
+// format chips (gcode = green, bgcode = blue, 3mf = orange).
+const fileFormatAccent = (fileFormat: string): string => {
+  switch ((fileFormat || '').toLowerCase()) {
+    case 'gcode': return 'rgb(var(--v-theme-success))'
+    case 'bgcode': return 'rgb(var(--v-theme-info))'
+    case '3mf': return 'rgb(var(--v-theme-warning))'
+    default: return 'rgba(var(--v-theme-on-surface), 0.2)'
+  }
+}
+
+const fileFilamentText = (file: FileMetadata): string => {
+  const grams = file.metadata?.filamentUsedGrams as number | number[] | null | undefined
+  if (grams == null) return ''
+  if (Array.isArray(grams)) {
+    return grams.map((v) => (v != null ? v.toFixed(1) : '-')).join(', ') + 'g'
+  }
+  return grams.toFixed(1) + 'g'
+}
 
 onMounted(async () => {
   await Promise.all([loadFiles(), loadFolderTree()])
@@ -865,14 +887,6 @@ const folderBreadcrumb = computed(() => {
     acc.push({ path: prefix, name: seg })
   }
   return acc
-})
-
-const folderPickerItems = computed(() => {
-  const items = [{ title: 'Root', value: '' }]
-  for (const path of allFolderPaths.value) {
-    items.push({ title: path, value: path })
-  }
-  return items
 })
 
 async function navigateToFolder(path: string | null) {
@@ -1025,15 +1039,52 @@ async function submitMoveDialog() {
   }
 }
 
+function openRenameFile(file: FileMetadata) {
+  const full = displayFileName(file)
+  const dot = full.lastIndexOf('.')
+  renameDialog.file = file
+  renameDialog.ext = dot > 0 ? full.slice(dot) : ''
+  renameDialog.name = dot > 0 ? full.slice(0, dot) : full
+  renameDialog.error = null
+  renameDialog.open = true
+}
+
+async function submitRename() {
+  if (!renameDialog.file) return
+  const base = renameDialog.name.trim()
+  if (!base) {
+    renameDialog.error = 'A name is required'
+    return
+  }
+
+  renameDialog.busy = true
+  renameDialog.error = null
+  try {
+    await FileStorageService.renameFile(renameDialog.file.fileStorageId, base + renameDialog.ext)
+    snackbar.info('File renamed')
+    renameDialog.open = false
+    await loadFiles()
+  } catch (err: any) {
+    renameDialog.error =
+      err?.response?.data?.error || err?.message || 'Rename failed'
+  } finally {
+    renameDialog.busy = false
+  }
+}
+
 // ── Bulk actions ─────────────────────────────────────────────
 async function bulkDeleteSelected() {
-  if (selected.value.length === 0) return
-  const count = selected.value.length
+  const fileCount = selected.value.length
+  const folderCount = selectedFolders.value.length
+  const count = fileCount + folderCount
+  if (count === 0) return
   const ok = await confirmDialog({
-    title: `Delete ${count} file${count === 1 ? '' : 's'}?`,
-    message: 'The selected files will be removed from File Storage.',
+    title: `Delete ${count} item${count === 1 ? '' : 's'}?`,
+    message: folderCount > 0
+      ? 'The selected files and folders (including everything inside them) will be removed from File Storage.'
+      : 'The selected files will be removed from File Storage.',
     hint: 'This cannot be undone.',
-    confirmText: `Delete ${count} file${count === 1 ? '' : 's'}`,
+    confirmText: `Delete ${count} item${count === 1 ? '' : 's'}`,
     severity: 'danger',
     icon: 'delete',
   })
@@ -1043,6 +1094,14 @@ async function bulkDeleteSelected() {
   let deleted = 0
   let failed = 0
   try {
+    for (const path of selectedFolders.value) {
+      try {
+        await FileStorageService.deleteFolder(path, { deleteFiles: true, force: true })
+        deleted++
+      } catch {
+        failed++
+      }
+    }
     for (const id of selected.value) {
       try {
         await FileStorageService.deleteFile(id)
@@ -1054,10 +1113,11 @@ async function bulkDeleteSelected() {
     snackbar.info(
       failed > 0
         ? `Deleted ${deleted}, failed ${failed}`
-        : `Deleted ${deleted} file(s)`
+        : `Deleted ${deleted} item(s)`
     )
-    selected.value = []
+    clearSelection()
     await loadFiles()
+    await loadFolderTree()
   } finally {
     bulkDeleting.value = false
   }
@@ -1065,6 +1125,15 @@ async function bulkDeleteSelected() {
 
 function openBulkMoveDialog() {
   bulkMoveDialog.targetPath = currentFolderPath.value ?? ''
+  bulkMoveDialog.error = null
+  bulkMoveDialog.open = true
+}
+
+// Move a single folder via the bulk-move dialog (selects just that folder).
+function moveFolderSingle(folder: FolderInfo) {
+  selected.value = []
+  selectedFolders.value = [folder.path]
+  bulkMoveDialog.targetPath = ''
   bulkMoveDialog.error = null
   bulkMoveDialog.open = true
 }
@@ -1112,7 +1181,7 @@ async function onFolderDrop(targetPath: string | null) {
 }
 
 async function submitBulkMove() {
-  if (selected.value.length === 0) return
+  if (selected.value.length === 0 && selectedFolders.value.length === 0) return
   const target = bulkMoveDialog.targetPath.trim() || null
 
   bulkMoveDialog.busy = true
@@ -1120,6 +1189,19 @@ async function submitBulkMove() {
   let ok = 0
   let fail = 0
   try {
+    // Folders move via renameFolder: the destination is the target folder
+    // plus the folder's own name (the backend rewrites all descendant paths
+    // and rejects moving a folder into one of its own descendants).
+    for (const path of selectedFolders.value) {
+      const name = path.split('/').filter(Boolean).pop() || path
+      const dest = target ? `${target}/${name}` : `/${name}`
+      try {
+        await FileStorageService.renameFolder(path, dest)
+        ok++
+      } catch {
+        fail++
+      }
+    }
     for (const id of selected.value) {
       try {
         await FileStorageService.moveFileToFolder(id, target)
@@ -1131,11 +1213,12 @@ async function submitBulkMove() {
     snackbar.info(
       fail > 0
         ? `Moved ${ok}, failed ${fail}`
-        : `Moved ${ok} file(s) to ${target || 'Root'}`
+        : `Moved ${ok} item(s) to ${target || 'Root'}`
     )
     bulkMoveDialog.open = false
-    selected.value = []
+    clearSelection()
     await loadFiles()
+    await loadFolderTree()
   } catch (err: any) {
     bulkMoveDialog.error =
       err?.response?.data?.error || err?.message || 'Bulk move failed'
@@ -1333,33 +1416,99 @@ const uploadItems = async (items: UploadItem[]) => {
     }
   }
 
-  // 2) Upload each file into its destination folder.
+  // 2) Upload each file into its destination folder. A 409 means a file with
+  // that name already exists in that folder — collect those separately from
+  // genuine failures so we can offer to overwrite them.
   let failures = 0
+  const conflicts: Array<{ file: File; folderPath: string | null }> = []
   for (let i = 0; i < accepted.length; i++) {
     const { file, dir } = accepted[i]
+    const folderPath = resolveFolderPath(dir)
     try {
-      await FileStorageService.uploadFile(file, resolveFolderPath(dir))
+      await FileStorageService.uploadFile(file, folderPath)
       uploadProgress.value[i].percent = 100
-    } catch (error) {
-      console.error(`Failed to upload ${file.name}:`, error)
-      uploadProgress.value[i].error = 'Failed'
+    } catch (error: any) {
       uploadProgress.value[i].percent = 100
-      failures++
+      if (error?.response?.status === 409) {
+        uploadProgress.value[i].error = 'Already exists'
+        conflicts.push({ file, folderPath })
+      } else {
+        console.error(`Failed to upload ${file.name}:`, error)
+        uploadProgress.value[i].error = 'Failed'
+        failures++
+      }
     }
   }
 
   uploading.value = false
-  const ok = accepted.length - failures
-  if (ok > 0) snackbar.info(`Uploaded ${ok} file${ok === 1 ? '' : 's'}`)
-  if (failures > 0) snackbar.error(`${failures} file${failures === 1 ? '' : 's'} failed to upload`)
+  const ok = accepted.length - failures - conflicts.length
+  const summary: string[] = []
+  if (ok > 0) summary.push(`Uploaded ${ok}`)
+  if (conflicts.length > 0) summary.push(`${conflicts.length} already existed`)
+  if (failures > 0) summary.push(`${failures} failed`)
+  if (summary.length) snackbar.info(summary.join(' · '))
   if (skipped > 0) snackbar.info(`Skipped ${skipped} unsupported file${skipped === 1 ? '' : 's'}`)
 
-  // Reload files + folder tree after upload.
-  setTimeout(() => {
-    uploadProgress.value = []
-    loadFiles()
-    loadFolderTree()
-  }, 1500)
+  await loadFiles()
+  await loadFolderTree()
+
+  // Offer to overwrite the files that were skipped because they already exist.
+  if (conflicts.length > 0) {
+    const overwrite = await confirmDialog({
+      title: `${conflicts.length} file${conflicts.length === 1 ? '' : 's'} already existed`,
+      message:
+        conflicts.length === 1
+          ? 'It was kept as-is to avoid overwriting. Replace it with the version you just selected?'
+          : 'They were kept as-is to avoid overwriting. Replace them with the versions you just selected?',
+      confirmText: `Overwrite ${conflicts.length}`,
+      severity: 'warning',
+      icon: 'sync',
+    })
+    if (overwrite) {
+      await overwriteConflicts(conflicts)
+      return
+    }
+  }
+
+  maybeClearUpload()
+}
+
+// Replace each conflicting file: delete the existing one, then re-upload the
+// new version into the same folder.
+const overwriteConflicts = async (
+  conflicts: Array<{ file: File; folderPath: string | null }>
+) => {
+  uploading.value = true
+  uploadProgress.value = conflicts.map((c) => ({
+    fileName: c.folderPath ? `${c.folderPath}/${c.file.name}` : c.file.name,
+    percent: 0,
+  }))
+
+  let done = 0
+  let failed = 0
+  for (let i = 0; i < conflicts.length; i++) {
+    const c = conflicts[i]
+    try {
+      // The backend replaces the existing file atomically: the old one is only
+      // removed once the new upload is saved, so a failure here leaves it intact.
+      await FileStorageService.uploadFile(c.file, c.folderPath, true)
+      uploadProgress.value[i].percent = 100
+      done++
+    } catch (error) {
+      console.error(`Failed to overwrite ${c.file.name}:`, error)
+      uploadProgress.value[i].percent = 100
+      uploadProgress.value[i].error = 'Failed'
+      failed++
+    }
+  }
+
+  uploading.value = false
+  snackbar.info(
+    failed > 0 ? `Overwrote ${done}, ${failed} failed` : `Overwrote ${done} file${done === 1 ? '' : 's'}`
+  )
+  await loadFiles()
+  await loadFolderTree()
+  maybeClearUpload()
 }
 
 const openQueueDialog = (file: FileMetadata) => {
@@ -1561,15 +1710,153 @@ const openQueueDialog = (file: FileMetadata) => {
   color: rgba(var(--v-theme-on-surface), 0.85);
 }
 
-.files-upload-progress__bar {
-  margin-bottom: 6px;
+.files-upload-progress__current {
+  margin-top: 6px;
+  color: rgba(var(--v-theme-on-surface), 0.6);
 }
 
-.files-upload-progress__bar:last-child {
-  margin-bottom: 0;
+.files-upload-progress__errors {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  border-radius: 6px;
 }
 
-.files-table {
-  background-color: transparent;
+.files-upload-progress__error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.04);
+}
+
+.files-upload-progress__error:last-child {
+  border-bottom: none;
+}
+
+.files-upload-progress__error-tag {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+/* ─── File rows ──────────────────────────────────────────────── */
+.fl-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.fl-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.fl-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px 6px 16px;
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  transition: background-color 0.12s ease;
+}
+
+.fl-row:hover {
+  background: rgba(var(--v-theme-primary), 0.04);
+}
+
+.fl-row--selected {
+  background: rgba(var(--v-theme-primary), 0.08);
+}
+
+.fl-row__accent {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--state-color, rgba(var(--v-theme-on-surface), 0.12));
+}
+
+/* Pull the checkbox's wide ripple area back a little — but leave a small gap
+   so it doesn't sit flush against the thumbnail/folder icon. */
+.fl-row__check {
+  flex: 0 0 auto;
+  margin-right: 2px;
+}
+
+.fl-row__check--spacer {
+  display: inline-block;
+  width: 28px;
+}
+
+.files-fs-row--selected {
+  background: rgba(var(--v-theme-primary), 0.08);
+}
+
+.fl-row__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: grab;
+}
+
+.fl-row__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.fl-row__drag {
+  color: rgba(var(--v-theme-on-surface), 0.4);
+}
+
+.fl-row__sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+.fl-row__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: 0 1 auto;
+  margin-left: auto;
+  max-width: 380px;
+}
+
+/* The chip's leading icon renders as tall as the chip, so it touches the
+   top/bottom edge. Shrink the icon below the chip height to give it vertical
+   breathing room. */
+.fl-row__meta :deep(.v-chip) {
+  min-height: 22px;
+}
+
+.fl-row__meta :deep(.v-chip .v-icon) {
+  font-size: 13px !important;
+  width: 13px;
+  height: 13px;
+}
+
+.fl-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.fl-pager {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
 }
 </style>

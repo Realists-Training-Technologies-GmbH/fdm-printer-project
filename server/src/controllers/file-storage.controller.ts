@@ -255,6 +255,56 @@ export class FileStorageController {
     res.send({ fileStorageId, folderPath: normalised });
   }
 
+  @PATCH()
+  @route("/:fileStorageId/rename")
+  async renameFile(req: Request, res: Response) {
+    const { fileStorageId } = req.params as { fileStorageId: string };
+    const body = req.body as { name?: unknown };
+
+    const exists = await this.fileStorageService.fileExists(fileStorageId);
+    if (!exists) {
+      res.status(404).send({ error: "File not found" });
+      return;
+    }
+
+    const rawName = typeof body?.name === "string" ? body.name.trim() : "";
+    if (!rawName) {
+      throw new BadRequestException("A new file name is required");
+    }
+    if (rawName.includes("/") || rawName.includes("\\")) {
+      throw new BadRequestException("File name cannot contain path separators");
+    }
+
+    const meta = await this.fileStorageService.loadMetadata(fileStorageId);
+    const currentName: string = meta?._originalFileName ?? fileStorageId;
+    const folderPath: string | null = meta?._folderPath ?? null;
+
+    // Preserve the original extension so a rename can never change the file
+    // format (e.g. .bgcode → .gcode), which would break printing.
+    const ext = extname(currentName);
+    const base = rawName.toLowerCase().endsWith(ext.toLowerCase())
+      ? rawName.slice(0, rawName.length - ext.length)
+      : rawName;
+    const newName = `${base}${ext}`;
+
+    if (newName === currentName) {
+      res.send({ fileStorageId, fileName: newName });
+      return;
+    }
+
+    // Per-folder name uniqueness, ignoring the file being renamed.
+    const clash = await this.fileStorageService.findDuplicateByOriginalFileName(newName, folderPath);
+    if (clash && clash.fileStorageId !== fileStorageId) {
+      throw new ConflictException(
+        `A file named "${newName}" already exists ${folderPath ? `in folder "${folderPath}"` : "in the root folder"}. Choose a different name.`,
+        clash.fileStorageId,
+      );
+    }
+
+    await this.fileStorageService.setOriginalFileName(fileStorageId, newName);
+    res.send({ fileStorageId, fileName: newName });
+  }
+
   /**
    * Get file metadata
    * GET /api/file-storage/:fileStorageId
@@ -441,7 +491,17 @@ export class FileStorageController {
 
     // Uniqueness is scoped to the destination folder, so the same filename can
     // live in different folders (needed for bulk/folder uploads).
-    await this.fileStorageService.validateUniqueFilename(file.originalname, folderPath);
+    //
+    // With `overwrite`, we don't reject a same-name collision; instead we
+    // remember the existing file and delete it only AFTER the new one is
+    // safely saved below — so a failed upload never destroys the old file.
+    const overwrite = req.body?.overwrite === "true" || req.body?.overwrite === true;
+    let previousDuplicate: { fileStorageId: string } | null = null;
+    if (overwrite) {
+      previousDuplicate = await this.fileStorageService.findDuplicateByOriginalFileName(file.originalname, folderPath);
+    } else {
+      await this.fileStorageService.validateUniqueFilename(file.originalname, folderPath);
+    }
 
     const ext = extname(file.originalname);
     const tempPathWithExt = file.path + ext;
@@ -468,6 +528,14 @@ export class FileStorageController {
         thumbnailMetadata,
         folderPath,
       );
+
+      // Overwrite is now safe: the replacement is fully saved, so drop the
+      // previous file. Skip when the deterministic id is unchanged (identical
+      // content+name+folder) — that already overwrote in place.
+      if (previousDuplicate && previousDuplicate.fileStorageId !== fileStorageId) {
+        await this.fileStorageService.deleteFile(previousDuplicate.fileStorageId);
+        this.logger.log(`Overwrote ${file.originalname}: removed previous ${previousDuplicate.fileStorageId}`);
+      }
 
       res.send({
         message: "File uploaded successfully",

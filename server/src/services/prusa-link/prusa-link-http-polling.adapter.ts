@@ -26,7 +26,7 @@ export class PrusaLinkHttpPollingAdapter implements IWebsocketAdapter {
   protected logger: LoggerService;
   private refreshPrinterCurrentInterval?: NodeJS.Timeout;
   private pollInFlight: boolean = false;
-  private consecutiveAuthFailures: number = 0;
+  private consecutiveFailures: number = 0;
 
   private eventEmittingAllowed: boolean = true;
 
@@ -153,7 +153,7 @@ export class PrusaLinkHttpPollingAdapter implements IWebsocketAdapter {
       const status = await this.prusaLinkApi.getStatus().catch(() => null);
       this.updateSocketState(SOCKET_STATE.authenticated);
       this.updateApiState(API_STATE.responding);
-      this.consecutiveAuthFailures = 0;
+      this.consecutiveFailures = 0;
 
       // Native/Buddy PrusaLink (XL, MK4, …) does NOT emit `link_state` on
       // /api/printer — it carries the live state on /api/v1/status instead.
@@ -264,21 +264,46 @@ export class PrusaLinkHttpPollingAdapter implements IWebsocketAdapter {
     } catch (error) {
       this.updateSocketState(SOCKET_STATE.error);
 
-      // Throttle log noise when the printer is unreachable or credentials are
-      // wrong — we'd otherwise spam the log every 5s. After 3 consecutive
-      // failures, only log once per minute.
-      const status = (error as any)?.response?.status;
-      const isAuthFailure = status === 401 || status === 403;
-      if (isAuthFailure) this.consecutiveAuthFailures++;
-      else this.consecutiveAuthFailures = 0;
-
-      const shouldLog = this.consecutiveAuthFailures <= 3 || this.consecutiveAuthFailures % 12 === 0;
+      // Throttle log noise on any sustained failure (printer offline, slow, or
+      // rejecting credentials) — we'd otherwise spam the log every poll tick.
+      // After 3 consecutive failures, only log once per minute (every 12th
+      // tick at the 5s default cadence).
+      this.consecutiveFailures++;
+      const shouldLog = this.consecutiveFailures <= 3 || this.consecutiveFailures % 12 === 0;
       if (shouldLog) {
-        this.logger.error(`Failed to fetch PrusaLink status ${errorSummary(error)}`, this.logMeta());
+        // An unreachable printer or bad credentials is an expected operational
+        // condition, not a code bug, so log a one-line reason without Axios's
+        // internal stack trace. Unexpected errors still get the full summary.
+        const reason = this.pollFailureReason(error);
+        if (reason) {
+          this.logger.warn(`PrusaLink poll failed — ${reason}`, this.logMeta());
+        } else {
+          this.logger.error(`Failed to fetch PrusaLink status ${errorSummary(error)}`, this.logMeta());
+        }
       }
     } finally {
       this.pollInFlight = false;
     }
+  }
+
+  /**
+   * Classify an expected, transient poll failure (printer offline, slow, or
+   * rejecting credentials) into a short human-readable reason. Returns null
+   * for anything unexpected so the caller falls back to a full error summary.
+   */
+  private pollFailureReason(error: any): string | null {
+    const status = error?.response?.status;
+    if (status === 401 || status === 403) return `auth rejected (${status})`;
+
+    const code = error?.code;
+    if (code === "ECONNABORTED" || /timeout/i.test(error?.message ?? "")) return "request timed out";
+    if (code === "ECONNREFUSED") return "connection refused";
+    if (code === "ECONNRESET") return "connection reset";
+    if (code === "ETIMEDOUT") return "connection timed out";
+    if (code === "EHOSTUNREACH") return "host unreachable";
+    if (code === "ENETUNREACH") return "network unreachable";
+    if (code === "ENOTFOUND") return "DNS lookup failed";
+    return null;
   }
 
   stopPolling() {
@@ -328,6 +353,6 @@ export class PrusaLinkHttpPollingAdapter implements IWebsocketAdapter {
   }
 
   private logMeta() {
-    return defaultLog;
+    return { ...defaultLog, printerId: this.printerId };
   }
 }

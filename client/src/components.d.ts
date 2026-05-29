@@ -40,6 +40,7 @@ declare module 'vue' {
     FileThumbnailViewer: typeof import('./components/Files/FileThumbnailViewer.vue')['default']
     FirstTimeSetupView: typeof import('./components/FirstTimeSetup/FirstTimeSetupView.vue')['default']
     FloorSettings: typeof import('./components/Settings/FloorSettings.vue')['default']
+    FolderPicker: typeof import('./components/Files/FolderPicker.vue')['default']
     GithubIssuesButton: typeof import('./components/Generic/Actions/GithubIssuesButton.vue')['default']
     GridLoader: typeof import('./components/Generic/Loaders/GridLoader.vue')['default']
     GridSettingsMenu: typeof import('./components/PrinterGrid/GridSettingsMenu.vue')['default']
