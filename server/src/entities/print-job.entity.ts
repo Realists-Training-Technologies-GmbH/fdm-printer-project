@@ -14,7 +14,7 @@ import { Printer } from "@/entities/printer.entity";
 export type PrintJobStatus =
   | "PENDING" // File uploaded, awaiting action
   | "QUEUED" // In printer queue
-  | "STARTING" // Print job initializing
+  | "STARTING" // File transfer to printer in flight (upload starts via "process next")
   | "PRINTING" // Active print in progress
   | "PAUSED" // Print paused by user/system
   | "COMPLETED" // Print finished successfully

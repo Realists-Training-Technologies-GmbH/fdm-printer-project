@@ -5,6 +5,8 @@ import { PrintJobService } from "@/services/orm/print-job.service";
 import { FileStorageService } from "@/services/file-storage.service";
 import { FileAnalysisService } from "@/services/file-analysis.service";
 import { PrinterApiFactory } from "@/services/printer-api.factory";
+import type { IPrinterApi } from "@/services/printer-api.interface";
+import type { PrintJob } from "@/entities/print-job.entity";
 import { PrinterCache } from "@/state/printer.cache";
 import { captureException } from "@sentry/node";
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -66,24 +68,18 @@ export class PrintFileDownloaderService {
       // Get printer API
       const printerApi = this.printerApiFactory.getById(job.printerId);
 
-      this.logger.log(`Downloading file ${job.fileName} from printer ${printer.name} (${printer.printerType})`);
+      // Prefer the storage-relative path the poll captured (e.g.
+      // "Production/AT16/file.bgcode") because PrusaLink's download URL builder
+      // is rooted at the storage and a bare leaf filename 404s when the file
+      // lives inside subfolders. Falls back to fileName for jobs that predate
+      // the poll-side path capture.
+      const downloadPath = job.usbFilePath ?? job.fileName;
+      this.logger.log(`Downloading file ${downloadPath} from printer ${printer.name} (${printer.printerType})`);
 
       // Download file from printer
       let fileBuffer: Buffer;
       try {
-        const response = await printerApi.downloadFile(job.fileName);
-
-        // Convert stream to buffer
-        const chunks: Buffer[] = [];
-        const stream = response.data;
-
-        await new Promise<void>((resolve, reject) => {
-          stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-          stream.on("end", () => resolve());
-          stream.on("error", (err) => reject(err));
-        });
-
-        fileBuffer = Buffer.concat(chunks);
+        fileBuffer = await this.downloadFileWithSearchFallback(printerApi, job, downloadPath);
       } catch (downloadError) {
         this.logger.error(`Failed to download file from printer: ${downloadError}`);
 
@@ -219,5 +215,170 @@ export class PrintFileDownloaderService {
         this.logger.error(`Failed to mark job ${jobId} as failed`, updateError);
       }
     }
+  }
+
+  /**
+   * Download the file from the printer, falling back to a bounded BFS through
+   * the printer's storage when the direct path fails. Used to self-heal jobs
+   * that only have a leaf `fileName` (e.g. captured from polling before
+   * `usbFilePath` was persisted) — without this rescue path those would 404
+   * forever because PrusaLink's download URL is rooted at the storage and a
+   * bare leaf isn't enough to locate a file nested in subfolders.
+   */
+  private async downloadFileWithSearchFallback(
+    printerApi: IPrinterApi,
+    job: PrintJob,
+    initialPath: string,
+  ): Promise<Buffer> {
+    try {
+      return await this.streamDownload(printerApi, initialPath);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status !== 404) throw err;
+
+      const leaf = initialPath.split(/[\\/]/).pop()!;
+      this.logger.warn(`Direct download of "${initialPath}" returned 404 — searching storage by leaf "${leaf}"`);
+
+      const resolved = await this.findFileByLeafName(printerApi, leaf);
+      if (!resolved) throw err;
+
+      this.logger.log(`Resolved "${leaf}" to storage path "${resolved}" — persisting and retrying download`);
+      job.usbFilePath = resolved;
+      await this.printJobService.printJobRepository.save(job);
+
+      return await this.streamDownload(printerApi, resolved);
+    }
+  }
+
+  private async streamDownload(printerApi: IPrinterApi, path: string): Promise<Buffer> {
+    const response = await printerApi.downloadFile(path);
+
+    const chunks: Buffer[] = [];
+    const stream = response.data;
+    // Two-tier timeout. PrusaLink's HTTP server is single-threaded and slow,
+    // so legitimate downloads of large .bgcode/.gcode files can take a while —
+    // but a printer that vanishes mid-stream (Wi-Fi drop, power cycle) leaves
+    // the TCP connection hanging without surfacing an error for ~30-120s.
+    // Without these, the analyser stays stuck on a dead job, blocking the
+    // event loop's retry path. Idle: 30s since the last chunk → assume the
+    // peer disappeared. Overall: 5 min hard cap so a slowloris-ish printer
+    // can't pin the worker forever.
+    const idleTimeoutMs = 30_000;
+    // PrusaLink streams are throughput-bound: a printer that's actively
+    // printing can only spare a fraction of its single-threaded HTTP server
+    // for the download, and full-quality .gcode for long prints (e.g. 25h /
+    // 370g jobs) routinely exceed 100 MB. With 3 concurrent retries across
+    // the farm the effective per-stream throughput drops to a trickle — 5
+    // minutes was too tight and tripped the cap on healthy downloads. 15 min
+    // matches the worst-case throughput we've observed in this farm.
+    const overallTimeoutMs = 15 * 60_000;
+
+    await new Promise<void>((resolve, reject) => {
+      let idleTimer: NodeJS.Timeout;
+      const overallTimer = setTimeout(() => {
+        clearTimeout(idleTimer);
+        stream.destroy(new Error(`Download exceeded ${overallTimeoutMs}ms hard cap`));
+      }, overallTimeoutMs);
+      const resetIdle = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          stream.destroy(new Error(`Download stalled — no data for ${idleTimeoutMs}ms`));
+        }, idleTimeoutMs);
+      };
+      resetIdle();
+
+      stream.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
+        resetIdle();
+      });
+      stream.on("end", () => {
+        clearTimeout(idleTimer);
+        clearTimeout(overallTimer);
+        resolve();
+      });
+      stream.on("error", (err) => {
+        clearTimeout(idleTimer);
+        clearTimeout(overallTimer);
+        reject(err);
+      });
+    });
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * Walk the printer's storage looking for a file whose display name (or
+   * addressable name) matches `leafName`. Returns the storage-relative path of
+   * the first match, or null when not found.
+   *
+   * Best-first traversal scored by token overlap with the target leaf: a
+   * filename like "AT16-p6.3_Haut-Rahmen-…" prioritises folders named "AT16",
+   * "AT16-Produktion-XL", etc. before falling back to siblings. Crucial for
+   * deep production trees — a plain BFS exhausts its budget on shallow
+   * irrelevant branches before reaching the right subtree. Bounds keep the
+   * cost finite on huge USBs.
+   */
+  private async findFileByLeafName(printerApi: IPrinterApi, leafName: string): Promise<string | null> {
+    const targetUpper = leafName.trim().toUpperCase();
+    const maxFolders = 128;
+    const maxEntries = 8000;
+
+    // 2+ char alphanumeric tokens. Single chars match everything and add
+    // nothing but noise; punctuation isn't part of any folder name.
+    const targetTokens = leafName
+      .toUpperCase()
+      .split(/[^A-Z0-9]+/)
+      .filter((t) => t.length >= 2);
+
+    const scoreDir = (dirPath: string): number => {
+      const upper = dirPath.toUpperCase();
+      let score = 0;
+      for (const t of targetTokens) {
+        if (upper.includes(t)) score++;
+      }
+      return score;
+    };
+
+    // Best-first priority queue: highest-scoring dir popped first. Insertion
+    // sort on each enqueue is fine — the queue stays small in practice (a few
+    // dozen entries at most before we exhaust the folder budget).
+    type Entry = { path: string; score: number };
+    const queue: Entry[] = [{ path: "", score: 0 }];
+    const visited = new Set<string>();
+    let entriesSeen = 0;
+
+    while (queue.length > 0 && visited.size < maxFolders) {
+      const { path: dir } = queue.shift()!;
+      if (visited.has(dir)) continue;
+      visited.add(dir);
+
+      let listing;
+      try {
+        listing = await printerApi.getFiles(false, dir);
+      } catch (e) {
+        this.logger.debug(`Listing failed for "${dir}" during search: ${e}`);
+        continue;
+      }
+
+      for (const file of listing.files) {
+        entriesSeen++;
+        if (entriesSeen > maxEntries) return null;
+        const leafFromPath = file.path.split(/[\\/]/).pop() ?? "";
+        const display = (file.displayName ?? "").toUpperCase();
+        if (leafFromPath.toUpperCase() === targetUpper || display === targetUpper) {
+          return file.path;
+        }
+      }
+
+      for (const sub of listing.dirs) {
+        if (visited.has(sub.path)) continue;
+        const entry = { path: sub.path, score: scoreDir(sub.path) };
+        // Insert keeping descending order by score, FIFO within equal scores.
+        let i = 0;
+        while (i < queue.length && queue[i].score >= entry.score) i++;
+        queue.splice(i, 0, entry);
+      }
+    }
+
+    return null;
   }
 }

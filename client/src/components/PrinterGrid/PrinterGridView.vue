@@ -19,6 +19,8 @@
 
     <!-- Show normal grid when floors exist -->
     <template v-else>
+      <PrinterGridSummaryBar/>
+
       <HomeToolbar/>
 
       <UploadToolbar/>
@@ -37,6 +39,7 @@ import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import HomeToolbar from './HomeToolbar.vue'
 import UploadToolbar from './UploadToolbar.vue'
 import PrinterGrid from './PrinterGrid.vue'
+import PrinterGridSummaryBar from './PrinterGridSummaryBar.vue'
 
 const route = useRoute()
 const floorStore = useFloorStore()

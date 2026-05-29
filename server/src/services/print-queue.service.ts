@@ -12,6 +12,21 @@ import { SOCKET_STATE } from "@/shared/dtos/socket-state.type";
 import { API_STATE } from "@/shared/dtos/api-state.type";
 import { PrinterMaintenanceLogService } from "@/services/orm/printer-maintenance-log.service";
 import { BadRequestException } from "@/exceptions/runtime.exceptions";
+import { uploadProgressEvent } from "@/constants/event.constants";
+import { v4 as uuidv4 } from "uuid";
+import type { AxiosProgressEvent } from "axios";
+
+export interface QueueUploadProgress {
+  printerId: number;
+  jobId: number;
+  fileName: string;
+  // 0-1 (axios progress). Null when the printer's server hasn't sent any
+  // bytes yet (initial connection / digest-auth dance) — UI should treat
+  // null as "transfer starting".
+  progress: number | null;
+  loaded: number;
+  total: number | null;
+}
 
 // Subfolder on the printer's own storage where File-Storage prints are uploaded.
 // Keeps print copies out of the printer's root and lets us clean them up: the
@@ -64,6 +79,11 @@ export interface IPrintQueueService {
   clearQueue(printerId: number): Promise<void>;
 
   processQueue(printerId: number): Promise<PrintJob | null>;
+
+  resetStrandedDispatches(): Promise<number>;
+
+  /** Snapshot of in-flight queue uploads keyed by printerId. */
+  getActiveUploads(): Record<number, QueueUploadProgress>;
 }
 
 /**
@@ -74,6 +94,13 @@ export class PrintQueueService implements IPrintQueueService {
   printerRepository: Repository<Printer>;
   eventEmitter2: EventEmitter2;
   private readonly logger: LoggerService;
+  // Live upload progress keyed by printerId. Populated by
+  // `dispatchToPrinter` while the PUT/POST is streaming and cleared in a
+  // `finally` so a stuck connection can't leave a phantom entry. Read
+  // through `getActiveUploads()` by SocketIoTask and broadcast in the
+  // periodic update payload — that's how the grid tile's "Transferring…"
+  // progress bar gets its data.
+  private readonly uploadProgressByPrinterId = new Map<number, QueueUploadProgress>();
 
   constructor(
     loggerFactory: ILoggerFactory,
@@ -182,12 +209,15 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async getQueue(printerId: number): Promise<QueuedJob[]> {
+    // Include STARTING so the queue UI keeps showing the job that's currently
+    // mid-upload as "transferring" instead of vanishing the moment processQueue
+    // flips its status. Both QUEUED and STARTING jobs still carry queuePosition
+    // until the upload completes.
     const jobs = await this.printJobRepository.find({
-      where: {
-        printerId,
-        status: "QUEUED",
-        queuePosition: Not(IsNull()),
-      },
+      where: [
+        { printerId, status: "QUEUED", queuePosition: Not(IsNull()) },
+        { printerId, status: "STARTING", queuePosition: Not(IsNull()) },
+      ],
       order: { queuePosition: "ASC" },
     });
 
@@ -267,6 +297,37 @@ export class PrintQueueService implements IPrintQueueService {
     this.eventEmitter2.emit("printQueue.reordered", { printerId });
   }
 
+  /**
+   * Recover stranded background dispatches at boot.
+   *
+   * A STARTING job represents an upload that was in flight when the server
+   * stopped. The actual TCP upload died with the process, so the printer
+   * never received the full file. Roll these back to QUEUED with a clear
+   * statusReason so the user (or queue auto-advance) can retry.
+   *
+   * queuePosition is left intact so the job keeps its slot.
+   */
+  getActiveUploads(): Record<number, QueueUploadProgress> {
+    const out: Record<number, QueueUploadProgress> = {};
+    for (const [printerId, progress] of this.uploadProgressByPrinterId.entries()) {
+      out[printerId] = progress;
+    }
+    return out;
+  }
+
+  async resetStrandedDispatches(): Promise<number> {
+    const stranded = await this.printJobRepository.find({ where: { status: "STARTING" } });
+    if (stranded.length === 0) return 0;
+
+    for (const job of stranded) {
+      job.status = "QUEUED";
+      job.statusReason = "Upload interrupted by server restart — requeued for retry.";
+      await this.printJobRepository.save(job);
+      this.logger.warn(`Reset stranded STARTING job ${job.id} (printer ${job.printerId}) → QUEUED`);
+    }
+    return stranded.length;
+  }
+
   async clearQueue(printerId: number): Promise<void> {
     const jobs = await this.printJobRepository.find({
       where: {
@@ -325,12 +386,15 @@ export class PrintQueueService implements IPrintQueueService {
   // Refuse to dispatch a second print to a printer that's already busy. The
   // observer (printer-events.cache) keeps an active job at PRINTING/PAUSED, so
   // a busy printer means starting another print would either be rejected by the
-  // firmware or silently clobber the running job's tracking.
+  // firmware or silently clobber the running job's tracking. STARTING is
+  // included because that's our own "upload in flight" marker — the printer is
+  // already receiving bytes and a second dispatch would collide on the wire.
   private async ensurePrinterIdle(printerId: number, exceptJobId: number): Promise<void> {
     const active = await this.printJobRepository.findOne({
       where: [
         { printerId, status: "PRINTING" },
         { printerId, status: "PAUSED" },
+        { printerId, status: "STARTING" },
       ],
       order: { startedAt: "DESC" },
     });
@@ -391,32 +455,72 @@ export class PrintQueueService implements IPrintQueueService {
     await this.ensurePrinterNotInMaintenance(printerId);
     await this.ensurePrinterIdle(printerId, jobId);
 
-    this.logger.log(`Submitting job ${jobId} (${job.fileName}) to printer ${printerId}`);
-
-    // Push to the printer FIRST and only mutate the job once the firmware has
-    // accepted it. If the upload/start fails the job stays QUEUED with its
-    // queuePosition intact, so the user (or auto-advance) can retry instead of
-    // it dropping out of the queue as FAILED.
-    try {
-      await this.dispatchToPrinter(printerId, job);
-    } catch (error) {
-      job.statusReason = `Print submission failed: ${error instanceof Error ? error.message : "Unknown error"}`;
-      await this.printJobRepository.save(job);
-      this.logger.error(`Failed to submit job ${jobId} to printer ${printerId} - left in queue for retry`, error);
-      throw error;
-    }
-
-    if (job.queuePosition !== null) {
-      const oldPosition = job.queuePosition;
-      job.queuePosition = null;
-      await this.compactQueuePositions(printerId, oldPosition);
-    }
-    job.status = "PRINTING";
-    job.startedAt = new Date();
+    // Flip status to STARTING synchronously so:
+    //  - ensurePrinterIdle on a concurrent "process next" sees the printer busy
+    //  - the queue UI shows "transferring..." instead of plain "QUEUED"
+    //  - server restart / boot sweeper can find stuck uploads to recover
+    // queuePosition stays set until the upload actually succeeds; the row only
+    // leaves the queue once we know the firmware accepted it.
+    job.status = "STARTING";
     job.statusReason = null;
     await this.printJobRepository.save(job);
 
-    this.logger.log(`Successfully submitted job ${jobId} to printer ${printerId}`);
+    this.logger.log(
+      `Dispatching job ${jobId} (${job.fileName}) to printer ${printerId} — upload running in background`,
+    );
+    this.eventEmitter2.emit("printQueue.jobSubmitting", { printerId, jobId });
+
+    // Detach the actual upload+start from the HTTP request that triggered it.
+    // PrusaLink uploads of 100+ MB take minutes; if the user closes/refreshes
+    // the page, we don't want the dispatch to die with the browser request.
+    // The background promise updates the job row on success/failure and emits
+    // events so the queue UI can reflect the outcome via Socket.IO.
+    void this.dispatchInBackground(printerId, jobId);
+  }
+
+  private async dispatchInBackground(printerId: number, jobId: number): Promise<void> {
+    let job = await this.printJobRepository.findOne({ where: { id: jobId } });
+    if (!job || job.status !== "STARTING") {
+      this.logger.warn(`Background dispatch for job ${jobId} skipped: status is ${job?.status ?? "missing"}`);
+      return;
+    }
+
+    try {
+      await this.dispatchToPrinter(printerId, job);
+
+      // Re-read the row — the poll observer may have already promoted it to
+      // PRINTING based on the printer's own status. Don't clobber that, but
+      // do clear queuePosition so the row leaves the visible queue.
+      job = (await this.printJobRepository.findOne({ where: { id: jobId } })) ?? job;
+      if (job.queuePosition !== null) {
+        const oldPosition = job.queuePosition;
+        job.queuePosition = null;
+        await this.compactQueuePositions(printerId, oldPosition);
+      }
+      if (job.status === "STARTING") {
+        job.status = "PRINTING";
+        job.startedAt = new Date();
+      }
+      job.statusReason = null;
+      await this.printJobRepository.save(job);
+
+      this.logger.log(`Successfully submitted job ${jobId} to printer ${printerId}`);
+      this.eventEmitter2.emit("printQueue.jobSubmitted", { printerId, jobId });
+    } catch (error) {
+      // Re-read and roll back to QUEUED so the next "process next" (or
+      // auto-advance) can retry. queuePosition is left intact so the job
+      // stays in its slot.
+      job = (await this.printJobRepository.findOne({ where: { id: jobId } })) ?? job;
+      job.status = "QUEUED";
+      job.statusReason = `Print submission failed: ${error instanceof Error ? error.message : "Unknown error"}`;
+      await this.printJobRepository.save(job);
+      this.logger.error(`Failed to submit job ${jobId} to printer ${printerId} - left in queue for retry`, error);
+      this.eventEmitter2.emit("printQueue.jobSubmissionFailed", {
+        printerId,
+        jobId,
+        reason: job.statusReason,
+      });
+    }
   }
 
   private async dispatchToPrinter(printerId: number, job: PrintJob): Promise<void> {
@@ -453,14 +557,40 @@ export class PrintQueueService implements IPrintQueueService {
       const fileSize = this.fileStorageService.getFileSize(job.fileStorageId);
       const fileStream = this.fileStorageService.readFileStream(job.fileStorageId);
 
+      // Generate a per-dispatch correlation token. PrusaLinkApi emits
+      // `upload.progress.${token}` events with axios's progress payload
+      // each time bytes flush; we mirror that into the per-printer map so
+      // the next periodic socketio update can surface a transfer bar in
+      // the grid tile.
+      const uploadToken = `queue-${job.id}-${uuidv4()}`;
+      const onProgress = (_token: string, event: AxiosProgressEvent) => {
+        this.uploadProgressByPrinterId.set(printerId, {
+          printerId,
+          jobId: job.id,
+          fileName,
+          progress: event.progress ?? null,
+          loaded: event.loaded,
+          total: event.total ?? null,
+        });
+      };
+      this.eventEmitter2.on(uploadProgressEvent(uploadToken), onProgress);
+
       this.logger.log(`Uploading file ${fileName} to printer ${printerId} (temp folder) and starting print`);
-      await printerApi.uploadFile({
-        stream: fileStream,
-        fileName,
-        contentLength: fileSize,
-        startPrint: true,
-        targetPath: PRINTER_TEMP_FOLDER,
-      });
+      try {
+        await printerApi.uploadFile({
+          stream: fileStream,
+          fileName,
+          contentLength: fileSize,
+          startPrint: true,
+          targetPath: PRINTER_TEMP_FOLDER,
+          uploadToken,
+        });
+      } finally {
+        // Always detach the listener AND clear the cache slot so a failed
+        // upload doesn't leave a stale "53%" indicator on the tile.
+        this.eventEmitter2.off(uploadProgressEvent(uploadToken), onProgress);
+        this.uploadProgressByPrinterId.delete(printerId);
+      }
     } else {
       throw new Error(`Job ${job.id} has neither fileStorageId nor usbFilePath - cannot submit to printer`);
     }

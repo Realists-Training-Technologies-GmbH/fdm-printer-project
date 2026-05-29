@@ -56,7 +56,14 @@ export interface PrintJobCancelledEvent {
 
 export interface IPrintJobService {
   handleFileAnalyzed(jobId: number, metadata: PrintJobMetadata, thumbnails?: any[]): Promise<PrintJob>;
-  handlePrintStarted(printerId: number, fileName: string, jobId?: number, printerName?: string): Promise<PrintJob>;
+  handlePrintStarted(
+    printerId: number,
+    fileName: string,
+    jobId?: number,
+    printerName?: string,
+    usbFilePath?: string | null,
+    usbDisplayName?: string | null,
+  ): Promise<PrintJob>;
   handlePrintProgress(printerId: number, progress: number): Promise<PrintJob | null>;
   handlePrintCompleted(printerId: number, fileName?: string): Promise<PrintJob | null>;
   handlePrintFailed(printerId: number, reason: string, fileName?: string): Promise<PrintJob | null>;
@@ -66,9 +73,17 @@ export interface IPrintJobService {
   cleanupStaleJobs(): Promise<void>;
   getActivePrintJob(printerId: number): Promise<PrintJob | null>;
   getPrintJobHistory(printerId: number, limit?: number): Promise<PrintJob[]>;
+  /** All jobs the DB believes are currently printing/paused across every printer. */
+  getAllActiveJobs(): Promise<PrintJob[]>;
 
   // Helper methods for printer middleware
-  markStarted(printerId: number, fileName: string, printerName?: string): Promise<PrintJob>;
+  markStarted(
+    printerId: number,
+    fileName: string,
+    printerName?: string,
+    usbFilePath?: string | null,
+    usbDisplayName?: string | null,
+  ): Promise<PrintJob>;
   markProgress(printerId: number, fileName: string, progress: number): Promise<PrintJob | null>;
   markFinished(printerId: number, fileName: string): Promise<PrintJob | null>;
   markFailed(printerId: number, fileName: string, reason: string): Promise<PrintJob | null>;
@@ -193,6 +208,8 @@ export class PrintJobService implements IPrintJobService {
     fileName: string,
     jobId?: number,
     printerName?: string,
+    usbFilePath?: string | null,
+    usbDisplayName?: string | null,
   ): Promise<PrintJob> {
     const existingJob = await this.printJobRepository.findOne({
       where: { printerId, status: "PRINTING" },
@@ -273,6 +290,19 @@ export class PrintJobService implements IPrintJobService {
     // Set/update printerName if provided
     if (printerName && !job.printerName) {
       job.printerName = printerName;
+    }
+
+    // Persist the printer-side storage path when the poll surfaces it. Only set
+    // when missing so values already populated by the print-queue submission
+    // path (which authored these columns originally) win over any later poll
+    // observation. Without this, jobs started directly from the printer's
+    // screen end up with just the leaf fileName and the file downloader 404s
+    // because it can't find the file at the storage root.
+    if (usbFilePath && !job.usbFilePath) {
+      job.usbFilePath = usbFilePath;
+    }
+    if (usbDisplayName && !job.usbDisplayName) {
+      job.usbDisplayName = usbDisplayName;
     }
 
     if (!job.statistics) {
@@ -500,8 +530,20 @@ export class PrintJobService implements IPrintJobService {
     });
   }
 
-  async markStarted(printerId: number, fileName: string, printerName?: string): Promise<PrintJob> {
-    return await this.handlePrintStarted(printerId, fileName, undefined, printerName);
+  async getAllActiveJobs(): Promise<PrintJob[]> {
+    return this.printJobRepository.find({
+      where: [{ status: "PRINTING" }, { status: "PAUSED" }],
+    });
+  }
+
+  async markStarted(
+    printerId: number,
+    fileName: string,
+    printerName?: string,
+    usbFilePath?: string | null,
+    usbDisplayName?: string | null,
+  ): Promise<PrintJob> {
+    return await this.handlePrintStarted(printerId, fileName, undefined, printerName, usbFilePath, usbDisplayName);
   }
 
   async markProgress(printerId: number, fileName: string, progress: number): Promise<PrintJob | null> {

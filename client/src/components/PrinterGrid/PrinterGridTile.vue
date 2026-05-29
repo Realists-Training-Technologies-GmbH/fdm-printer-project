@@ -49,8 +49,9 @@
         <!-- Top row: name + quick actions -->
         <header class="pg-tile__header">
           <span
-            class="pg-tile__name text-truncate"
-            :title="printer.name"
+            class="pg-tile__name pg-tile__name--clickable text-truncate"
+            :title="`${printer.name} — click to view print history`"
+            @click.stop.prevent="detailOpen = true"
           >
             {{ printer.name }}
           </span>
@@ -123,7 +124,12 @@
 
         <!-- Body: thumbnail + info -->
         <div class="pg-tile__body">
-          <div class="pg-tile__thumb">
+          <div
+            class="pg-tile__thumb"
+            :class="{ 'pg-tile__thumb--clickable': thumbnail?.length }"
+            :title="thumbnail?.length ? 'View larger preview' : undefined"
+            @click.stop.prevent="thumbnail?.length && (previewOpen = true)"
+          >
             <v-img
               v-if="isOnline && thumbnail?.length"
               :src="'data:image/png;base64,' + (thumbnail ?? '')"
@@ -170,7 +176,19 @@
             </div>
 
             <v-progress-linear
-              v-if="currentProgress !== undefined"
+              v-if="uploadProgress"
+              :model-value="uploadProgress.percent"
+              :indeterminate="uploadProgress.percent === 0"
+              color="info"
+              bg-color="rgba(255,255,255,0.08)"
+              height="5"
+              rounded
+              striped
+              class="pg-tile__progress"
+              :title="`Transferring · ${uploadProgress.percent}% · ${uploadProgress.fileName}`"
+            />
+            <v-progress-linear
+              v-else-if="currentProgress !== undefined"
               :model-value="currentProgress"
               :color="progressBarColor"
               bg-color="rgba(255,255,255,0.08)"
@@ -201,16 +219,31 @@
                     >
                       construction
                     </v-icon>
-                    {{ printer?.disabledReason ? 'MAINTENANCE' : (printerState?.text?.toUpperCase() || '—') }}
+                    {{ printer?.disabledReason ? 'Maintenance' : (printerState?.text || '—') }}<template v-if="lastSeenAgoFormatted"> · {{ lastSeenAgoFormatted }}</template>
                   </v-chip>
                 </template>
               </v-tooltip>
 
               <span
-                v-if="currentProgress !== undefined"
+                v-if="uploadProgress"
+                class="pg-tile__percent"
+                title="Transferring file to printer"
+              >
+                ↑ {{ uploadProgress.percent }}%
+              </span>
+              <span
+                v-else-if="currentProgress !== undefined"
                 class="pg-tile__percent"
               >
                 {{ currentProgress.toFixed(1) }}%
+              </span>
+
+              <span
+                v-if="!uploadProgress && timeRemainingFormatted"
+                class="pg-tile__eta"
+                :title="etaClockFormatted ? `Done at ${etaClockFormatted}` : 'Estimated time remaining'"
+              >
+                · {{ timeRemainingFormatted }}<template v-if="etaClockFormatted"> · {{ etaClockFormatted }}</template>
               </span>
 
               <v-spacer />
@@ -308,6 +341,21 @@
         </div>
       </template>
     </v-card>
+
+    <PrinterTilePreviewDialog
+      v-model="previewOpen"
+      :printer-name="printer?.name"
+      :file-name="previewFileName"
+      :thumbnail="thumbnail"
+      :estimated-seconds="previewEstimatedSeconds"
+      :remaining-seconds="timeRemainingSeconds"
+      :metadata="previewMetadata"
+    />
+
+    <PrinterDetailDialog
+      v-model="detailOpen"
+      :printer-id="printerId"
+    />
   </div>
 </template>
 
@@ -328,7 +376,11 @@ import { usePrinterStateStore } from '@/store/printer-state.store'
 import { PrinterDto } from '@/models/printers/printer.model'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { useDialog } from '@/shared/dialog.composable'
-import { usePrinterTileThumbnailQuery } from '@/queries/printer-tile-thumbnail.query'
+import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
+import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
+import { useQueryClient } from '@tanstack/vue-query'
+import PrinterTilePreviewDialog from './PrinterTilePreviewDialog.vue'
+import PrinterDetailDialog from './PrinterDetailDialog.vue'
 import { useFileExplorer } from '@/shared/file-explorer.composable'
 import { dragAppId, INTENT, PrinterPlace, DRAG_EVENTS } from '@/shared/drag.constants'
 import { hasEmergencyStop, hasPrinterControl, hasSerialConnection } from '@/shared/printer-capabilities.constants'
@@ -365,7 +417,26 @@ const tileIconThumbnailSize = computed(() =>
   largeTilesEnabled.value ? '80px' : '40px'
 )
 
-const { data: thumbnail } = usePrinterTileThumbnailQuery(printerId)
+const { data: thumbnailRecord } = usePrinterTileThumbnailQuery(printerId)
+const thumbnail = computed(() => thumbnailRecord.value?.thumbnailBase64 ?? '')
+
+// Refetch the per-printer thumbnail when the server signals it changed
+// (a new print just started). Without this, the TanStack cache stays
+// pinned to the previous print's preview until window focus refresh.
+const queryClient = useQueryClient()
+useOnPrinterThumbnailChanged((event) => {
+  if (event.printerId === printerId.value) {
+    queryClient.invalidateQueries({ queryKey: [printerTileThumbnailQueryKey, printerId] })
+  }
+})
+
+const previewOpen = ref(false)
+const detailOpen = ref(false)
+const previewMetadata = computed(() => thumbnailRecord.value?.job?.metadata ?? null)
+const previewEstimatedSeconds = computed(() => thumbnailRecord.value?.job?.estimatedSeconds ?? null)
+const previewFileName = computed(
+  () => thumbnailRecord.value?.fileName ?? thumbnailRecord.value?.job?.fileName ?? currentPrintingFilePath.value ?? null,
+)
 
 const isOnline = computed(() =>
   printerId.value ? printerStateStore.isApiResponding(printerId.value) : false
@@ -478,6 +549,74 @@ const currentProgress = computed(() => {
 
   const job = currentJob.value
   return job?.progress?.completion
+})
+
+// Queue dispatch transfer progress for this printer. Populated server-side
+// while a STARTING-status job's PUT is streaming to PrusaLink — the
+// printer itself reports IDLE during the upload, so `currentProgress`
+// (which reads the firmware's print progress) is unset. We display this
+// instead so the user knows the upload is alive and how close to done.
+const uploadProgress = computed<{ percent: number; fileName: string } | null>(() => {
+  if (!printerId.value) return null
+  const entry = printerStateStore.queueUploadsByPrinterId[printerId.value]
+  if (!entry) return null
+  const pct = entry.progress === null ? 0 : Math.round(entry.progress * 100)
+  return { percent: pct, fileName: entry.fileName }
+})
+
+const timeRemainingSeconds = computed<number | null>(() => {
+  if (!printerId.value) return null
+  // PrusaLink reports `printTimeLeft` (seconds) in the polled progress payload
+  // — see prusa-link-http-polling.adapter.ts. Zero / negative is treated as
+  // "unknown" since the firmware reports 0 both when finished and when the
+  // slicer didn't include an estimate.
+  const value = currentJob.value?.progress?.printTimeLeft
+  return typeof value === 'number' && value > 0 ? value : null
+})
+
+// Compact "h/m" form so it fits next to the percent without truncating the
+// chip or temperatures on smaller tiles. Seconds-only when the print is in
+// its last minute — anywhere else it's noise that flickers every poll.
+const timeRemainingFormatted = computed<string | null>(() => {
+  const total = timeRemainingSeconds.value
+  if (total === null) return null
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (hours > 0) return `${ hours }h ${ minutes }m`
+  if (minutes > 0) return `${ minutes }m`
+  return `${ Math.floor(total) }s`
+})
+
+// Wall-clock ETA — operators reading the grid in a busy workshop find
+// "done at 16:42" more actionable than "1h 24m" abstract. When the print
+// crosses midnight, append the day-after marker so 02:15 doesn't look
+// like it's about to happen.
+const etaClockFormatted = computed<string | null>(() => {
+  const remaining = timeRemainingSeconds.value
+  if (remaining === null) return null
+  const eta = new Date(Date.now() + remaining * 1000)
+  const hh = String(eta.getHours()).padStart(2, '0')
+  const mm = String(eta.getMinutes()).padStart(2, '0')
+  const sameDay = eta.toDateString() === new Date().toDateString()
+  return sameDay ? `${hh}:${mm}` : `${hh}:${mm} +1d`
+})
+
+// "Last seen Xm ago" hint for offline/unreachable printers. The
+// store exposes the last successful poll's timestamp; if we've never
+// heard from this printer (fresh add, never online) the hint is
+// suppressed so the chip just reads "Offline".
+const lastSeenAgoFormatted = computed<string | null>(() => {
+  if (!printerId.value || isOnline.value) return null
+  const ts = printerStateStore.printerCurrentEventReceivedAtById[printerId.value]
+  if (!ts) return null
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 })
 
 const currentPrintingFilePath = computed(() => {
@@ -759,6 +898,16 @@ const selectPrinterPosition = async () => {
   min-width: 0;
 }
 
+.pg-tile__name--clickable {
+  cursor: pointer;
+}
+
+.pg-tile__name--clickable:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: rgba(var(--v-theme-primary), 0.5);
+}
+
 .pg-tile__quick-actions {
   display: flex;
   align-items: center;
@@ -794,6 +943,15 @@ const selectPrinterPosition = async () => {
 .pg-tile__thumb--placeholder {
   opacity: 0.25;
   filter: grayscale(100%);
+}
+
+.pg-tile__thumb--clickable {
+  cursor: zoom-in;
+  transition: transform 120ms ease;
+}
+
+.pg-tile__thumb--clickable:hover {
+  transform: scale(1.04);
 }
 
 .pg-tile__info {
@@ -834,6 +992,12 @@ const selectPrinterPosition = async () => {
 .pg-tile__percent {
   font-weight: 700;
   color: rgb(var(--v-theme-on-surface));
+}
+
+.pg-tile__eta {
+  font-weight: 500;
+  color: rgba(var(--v-theme-on-surface), 0.72);
+  white-space: nowrap;
 }
 
 .pg-tile__temp {

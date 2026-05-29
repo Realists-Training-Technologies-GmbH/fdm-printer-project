@@ -19,6 +19,8 @@ import type { RoleName } from "@/constants/authorization.constants";
 import { PrintFileDownloaderService } from "@/services/print-file-downloader.service";
 import { FileStorageService } from "@/services/file-storage.service";
 import { BrandingService } from "@/services/core/branding.service";
+import { PrintQueueService } from "@/services/print-queue.service";
+import { PrinterEventsCache } from "@/state/printer-events.cache";
 
 export class BootTask implements TaskService {
   logger: LoggerService;
@@ -39,6 +41,8 @@ export class BootTask implements TaskService {
     private readonly printFileDownloaderService: PrintFileDownloaderService,
     private readonly fileStorageService: FileStorageService,
     private readonly brandingService: BrandingService,
+    private readonly printQueueService: PrintQueueService,
+    private readonly printerEventsCache: PrinterEventsCache,
   ) {
     this.logger = loggerFactory(BootTask.name);
   }
@@ -113,6 +117,15 @@ export class BootTask implements TaskService {
 
     await this.settingsStore.persistOptionalCredentialSettings(overrideJwtSecret, overrideJwtExpiresIn);
 
+    // Recover queue dispatches that were mid-upload when the server stopped.
+    // Their TCP streams died with the process so the printer never got the
+    // full file — roll them back to QUEUED with a clear statusReason so the
+    // user (or auto-advance) can retry instead of leaving them stuck.
+    const recovered = await this.printQueueService.resetStrandedDispatches();
+    if (recovered > 0) {
+      this.logger.warn(`Recovered ${recovered} stranded queue dispatch(es) from previous run`);
+    }
+
     this.logger.log("Clearing upload folder");
     this.multerService.clearUploadsFolder();
     this.logger.log("Loading printer sockets");
@@ -123,6 +136,16 @@ export class BootTask implements TaskService {
     await this.printerThumbnailCache.loadCache();
     const length = await this.printerThumbnailCache.getAllValues();
     this.logger.log(`Loaded ${length.length} thumbnail(s)`);
+
+    // Prime the observer's per-printer state from DB AND override the
+    // thumbnail cache with the actively-printing job's thumbnail. Must run
+    // AFTER `printerThumbnailCache.loadCache()` because loadCache picks
+    // "most recent ANALYZED job by endedAt DESC" — which surfaces a previous
+    // COMPLETED print's thumbnail over the one that's currently printing
+    // (PRINTING rows have NULL endedAt). The seed corrects that, and it
+    // must precede BOOT_TASKS registration since the polling task is one of
+    // them and we need lastPollState in place before the first tick fires.
+    await this.printerEventsCache.seedLastPollState();
 
     try {
       await this.brandingService.applyToBundles();

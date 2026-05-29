@@ -8,6 +8,7 @@ import EventEmitter2 from "eventemitter2";
 import { PrinterCache } from "@/state/printer.cache";
 import { LoggerService } from "@/handlers/logger";
 import type { ILoggerFactory } from "@/handlers/logger-factory";
+import { PrintQueueService } from "@/services/print-queue.service";
 
 export class SocketIoTask {
   logger: LoggerService;
@@ -21,12 +22,46 @@ export class SocketIoTask {
     private readonly printerCache: PrinterCache,
     private readonly fileUploadTrackerCache: FileUploadTrackerCache,
     private readonly eventEmitter2: EventEmitter2,
+    private readonly printQueueService: PrintQueueService,
   ) {
     this.logger = loggerFactory(SocketIoTask.name);
 
     this.eventEmitter2.on(socketIoConnectedEvent, async () => {
       await this.sendUpdate();
     });
+
+    // Bridge selected internal events to socket.io so the client can show
+    // toasts and invalidate per-printer queries reactively. These fire on
+    // discrete transitions (job dispatched, dispatch failed, thumbnail
+    // updated), so broadcasting them out-of-band is cheaper than fattening
+    // every periodic `Update` payload — and the client wouldn't notice
+    // queue state from a periodic snapshot if the user is on a different
+    // page.
+    this.eventEmitter2.on("printQueue.jobSubmitted", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.QueueEvent, { kind: "submitted", ...data }),
+    );
+    this.eventEmitter2.on("printQueue.jobSubmissionFailed", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.QueueEvent, { kind: "failed", ...data }),
+    );
+    this.eventEmitter2.on("printer.thumbnailChanged", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.PrinterThumbnailChanged, data),
+    );
+
+    // Print-lifecycle terminal transitions — fanned out so the client can
+    // raise a browser notification when an unattended print finishes. The
+    // raw payloads from PrintJobService already carry `jobId`, `printerId`,
+    // `fileName`, plus per-kind fields (`actualTimeSeconds` for completed,
+    // `reason` for failed). The client just needs the kind discriminator,
+    // hence the spread + literal `kind:` here.
+    this.eventEmitter2.on("printJob.completed", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.PrintJobEvent, { kind: "completed", ...data }),
+    );
+    this.eventEmitter2.on("printJob.failed", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.PrintJobEvent, { kind: "failed", ...data }),
+    );
+    this.eventEmitter2.on("printJob.cancelled", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.PrintJobEvent, { kind: "cancelled", ...data }),
+    );
   }
 
   async run() {
@@ -46,6 +81,11 @@ export class SocketIoTask {
       socketStates,
       printerEvents,
       trackedUploads,
+      // Queue upload progress keyed by printerId. Mutated by
+      // PrintQueueService while a dispatch's PUT is streaming; included on
+      // every periodic update so the tile can render a "Transferring…"
+      // bar without an extra round-trip per second.
+      queueUploads: this.printQueueService.getActiveUploads(),
     };
 
     this.socketIoGateway.send(IO_MESSAGES.Update, socketIoData);

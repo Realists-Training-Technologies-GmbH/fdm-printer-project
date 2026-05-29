@@ -311,7 +311,7 @@
               size="small"
               variant="elevated"
             >
-              {{ item.status || 'Unknown' }}
+              {{ formatStatusLabel(item.status) }}
             </v-chip>
           </template>
 
@@ -1379,12 +1379,32 @@ const getQueueStatusColor = (status: string) => {
   const colors: Record<string, string> = {
     'QUEUED': 'info',
     'PENDING': 'warning',
+    'STARTING': 'primary',
     'PRINTING': 'success',
     'COMPLETED': 'success',
     'FAILED': 'error',
     'CANCELLED': 'warning'
   }
   return colors[status] || 'default'
+}
+
+// Human-readable label for status enum values. Anything not in the map
+// falls through unchanged so an unexpected enum from the backend (e.g.
+// added later) is still visible instead of becoming "Unknown".
+const friendlyStatusLabel: Record<string, string> = {
+  PENDING: 'Pending',
+  QUEUED: 'Queued',
+  STARTING: 'Transferring…',
+  PRINTING: 'Printing',
+  PAUSED: 'Paused',
+  COMPLETED: 'Completed',
+  FAILED: 'Failed',
+  CANCELLED: 'Cancelled',
+  UNKNOWN: 'Unknown'
+}
+const formatStatusLabel = (status: string | null | undefined): string => {
+  if (!status) return 'Unknown'
+  return friendlyStatusLabel[status] ?? status
 }
 
 const getStatusColor = (status: string | null): string => {

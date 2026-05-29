@@ -478,8 +478,12 @@ export class PrintQueueController {
         return;
       }
 
-      res.send({
-        message: "Submitted next job in queue to printer",
+      // 202 Accepted: the dispatch is now running in the background. The
+      // response carries the job's current row (status will be STARTING) so
+      // the UI can flip to "transferring" immediately, but the upload itself
+      // outlives this HTTP request.
+      res.status(202).send({
+        message: "Dispatch started — upload running in background",
         printerId,
         nextJob: {
           id: nextJob.id,
@@ -787,12 +791,16 @@ export class PrintQueueController {
     try {
       await this.printQueueService.submitToPrinter(printerId, jobId);
 
-      res.send({
-        message: "Job submitted to printer for printing",
+      res.status(202).send({
+        message: "Dispatch started — upload running in background",
         printerId,
         jobId,
       });
     } catch (error) {
+      if (error instanceof BadRequestException) {
+        res.status(400).send({ error: "Cannot submit job", message: error.message });
+        return;
+      }
       this.logger.error(`Failed to submit job ${jobId} to printer ${printerId}: ${error}`);
       res.status(500).send({
         error: "Failed to submit job to printer",

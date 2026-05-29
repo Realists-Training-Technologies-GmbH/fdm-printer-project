@@ -12,10 +12,38 @@ import { reactive } from "vue";
 import { useEventBus } from "@vueuse/core";
 import { useDebugSocketStore } from "@/store/debug-socket.store";
 import { useOverlayStore } from "@/store/overlay.store";
+import { notifyPrinterThumbnailChanged } from "@/shared/printer-thumbnail-invalidator.composable";
+import { useBrowserNotifications } from "@/shared/notifications.composable";
 
 enum IO_MESSAGES {
   Update = "update",
   TestPrinterState = "test-printer-state",
+  // Mirrors server/src/state/socket-io.gateway.ts IO_MESSAGES. Keep these
+  // in sync; we don't have a shared types package between the two yet.
+  PrinterThumbnailChanged = "printer.thumbnailChanged",
+  QueueEvent = "printQueue.event",
+  PrintJobEvent = "printJob.event",
+}
+
+interface QueueEventPayload {
+  kind: "submitted" | "failed";
+  printerId?: number;
+  jobId?: number;
+  reason?: string;
+}
+
+interface PrinterThumbnailChangedPayload {
+  printerId: number;
+  jobId?: number;
+}
+
+interface PrintJobEventPayload {
+  kind: "completed" | "failed" | "cancelled";
+  jobId: number;
+  printerId: number;
+  fileName: string;
+  reason?: string;
+  actualTimeSeconds?: number;
 }
 
 let appSocketIO: Socket | null = null;
@@ -173,6 +201,11 @@ export class SocketIoService {
     if (message.printerEvents) {
       this.printerStateStore.setPrinterEvents(message.printerEvents);
     }
+
+    // queueUploads is the per-printer transfer progress for in-flight queue
+    // dispatches — null/missing is the steady state, so write an empty
+    // object rather than leaving the previous snapshot around.
+    this.printerStateStore.setQueueUploads(message.queueUploads ?? {});
   }
 
   private setupConnectionHandlers() {
@@ -236,6 +269,71 @@ export class SocketIoService {
     // Register test printer state handler
     appSocketIO.on(IO_MESSAGES.TestPrinterState, (data) => {
       this.testPrinterStore.saveEvent(data);
+    });
+
+    // Background-dispatch outcome → toast. We respond immediately to the
+    // POST /process with 202 so the user has no way of knowing whether the
+    // upload eventually succeeded without this event.
+    appSocketIO.on(IO_MESSAGES.QueueEvent, (data: QueueEventPayload) => {
+      const printerLabel = data.printerId ? `printer ${data.printerId}` : "printer";
+      if (data.kind === "failed") {
+        this.snackbar.openErrorMessage({
+          title: `Dispatch to ${printerLabel} failed`,
+          subtitle: data.reason ?? "Unknown error",
+        });
+      } else if (data.kind === "submitted") {
+        this.snackbar.openInfoMessage({
+          title: `Dispatched job to ${printerLabel}`,
+        });
+      }
+    });
+
+    // Thumbnail cache flipped to a new file (e.g. a new print started) —
+    // invalidate the grid tile's TanStack query via an event-bus emit so
+    // the new preview shows up without window focus / staleTime expiry.
+    appSocketIO.on(IO_MESSAGES.PrinterThumbnailChanged, (data: PrinterThumbnailChangedPayload) => {
+      if (typeof data?.printerId === "number") {
+        notifyPrinterThumbnailChanged({ printerId: data.printerId, jobId: data.jobId });
+      }
+    });
+
+    // Print lifecycle terminal transitions → browser notification AND
+    // toast. The user might be away from the dashboard tab when a 24h
+    // print finishes; the notification gets the operator's attention even
+    // with the tab in the background. Toast covers the foreground case.
+    const notifications = useBrowserNotifications();
+    appSocketIO.on(IO_MESSAGES.PrintJobEvent, (data: PrintJobEventPayload) => {
+      const printerName = this.printerStore.printer(data.printerId)?.name ?? `printer ${data.printerId}`;
+      if (data.kind === "completed") {
+        const minutes = data.actualTimeSeconds ? Math.round(data.actualTimeSeconds / 60) : null;
+        const body = minutes ? `${data.fileName} · ${minutes} min` : data.fileName;
+        notifications.notify(`${printerName} · Print complete`, {
+          body,
+          tag: `printJob-${data.jobId}`,
+        });
+        this.snackbar.openInfoMessage({
+          title: `${printerName} finished printing`,
+          subtitle: data.fileName,
+        });
+      } else if (data.kind === "failed") {
+        notifications.notify(`${printerName} · Print failed`, {
+          body: data.reason ?? data.fileName,
+          tag: `printJob-${data.jobId}`,
+        });
+        this.snackbar.openErrorMessage({
+          title: `${printerName}: print failed`,
+          subtitle: data.reason ?? data.fileName,
+        });
+      } else if (data.kind === "cancelled") {
+        // Cancelled is a deliberate user action; skip the high-priority
+        // browser notification to avoid spamming the operator with their
+        // own clicks, but still toast for visibility.
+        this.snackbar.openInfoMessage({
+          title: `${printerName}: print cancelled`,
+          subtitle: data.fileName,
+          warning: true,
+        });
+      }
     });
   }
 }

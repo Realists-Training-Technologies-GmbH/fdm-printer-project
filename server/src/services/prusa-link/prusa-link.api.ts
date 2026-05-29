@@ -277,6 +277,14 @@ export class PrusaLinkApi implements IPrinterApi {
       const parentEncoded = resolved.map(encodeURIComponent).join("/");
       const baseUrl = parentEncoded ? `/api/v1/files/${storage}/${parentEncoded}` : `/api/v1/files/${storage}`;
 
+      // FAT filenames are case-insensitive at the filesystem level, but
+      // PrusaLink reports `display_name` with whatever case the slicer wrote.
+      // When the caller's segment came from a poll payload (or any other
+      // upstream that may differ in case from the listing) an exact `===`
+      // match silently misses and the walk falls back to the literal user
+      // segment, which then 404s. Compare case-insensitively to stay aligned
+      // with the underlying filesystem semantics.
+      const segmentUpper = segment.toUpperCase();
       let matchName: string | null = null;
       try {
         for (let offset = 0; offset < maxItems; offset += pageSize) {
@@ -284,7 +292,10 @@ export class PrusaLinkApi implements IPrinterApi {
             children?: Array<{ name: string; display_name?: string }>;
           }>(`${baseUrl}?offset=${offset}&limit=${pageSize}`);
           const slice = response.data?.children ?? [];
-          const hit = slice.find((c) => c.display_name === segment || c.name === segment);
+          const hit = slice.find(
+            (c) =>
+              (c.display_name ?? "").toUpperCase() === segmentUpper || (c.name ?? "").toUpperCase() === segmentUpper,
+          );
           if (hit) {
             matchName = hit.name;
             break;
@@ -517,19 +528,42 @@ export class PrusaLinkApi implements IPrinterApi {
     // rejects with 404 (which it shouldn't, since Buddy resolves LFN, but the
     // fallback is here as insurance for older firmware).
     const storage = await this.getInternalStorage();
+    // PrusaLink's HTTP server validates the digest auth `uri` parameter against
+    // the request line verbatim. When the path contains spaces (e.g.
+    // "Bauteile XL 26-05-06/1 Haut-Rahmen p6.3/file.gcode") and we send it
+    // unencoded, axios percent-encodes the request line but the digest
+    // library signs the original — the hashes diverge and the printer 401s.
+    // Pre-encode every segment up front so the URL we sign and the URL we
+    // send are byte-identical.
+    const encodePath = (p: string) => p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
     let fileReference;
     try {
-      fileReference = await this.getFileRaw(path, storage);
+      fileReference = await this.getFileRaw(encodePath(path), storage);
     } catch (e: any) {
       if (e?.response?.status !== 404) throw e;
       const shortPath = await this.resolveStoragePath(path, storage);
-      const encoded = shortPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-      fileReference = await this.getFileRaw(encoded, storage);
+      fileReference = await this.getFileRaw(encodePath(shortPath), storage);
     }
     const pathUrl = fileReference.data.refs.download;
     const displayName = fileReference.data.display_name;
 
-    const response = await this.client.get(pathUrl, {
+    // The firmware-supplied `refs.download` URL also arrives unencoded (e.g.
+    // "/usb/Bauteile XL 26-05-06/.../AT16-P~1.GCO"). Same digest-auth signing
+    // hazard as above — encode each segment before issuing the GET. The
+    // leading "/usb" (or "/local") segment is preserved as-is since it's the
+    // storage prefix the firmware already knows how to parse.
+    const encodedPathUrl = (() => {
+      try {
+        return pathUrl
+          .split("/")
+          .map((seg, i) => (i === 0 || /^(usb|local|sdcard)$/i.test(seg) ? seg : encodeURIComponent(seg)))
+          .join("/");
+      } catch {
+        return pathUrl;
+      }
+    })();
+
+    const response = await this.client.get(encodedPathUrl, {
       responseType: "stream",
     });
 

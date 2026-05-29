@@ -86,4 +86,17 @@ export class SocketIoGateway {
 
 export const IO_MESSAGES = {
   Update: "update",
+  // Per-printer notification fired when the cached thumbnail row changes
+  // (e.g. a new print started). Lets the client invalidate TanStack queries
+  // for that printer without waiting for window focus / staleTime.
+  PrinterThumbnailChanged: "printer.thumbnailChanged",
+  // Outcome of an async queue dispatch — surfaces success/failure of the
+  // background upload to the user as a toast instead of letting them stare
+  // at a chip that silently flips back to QUEUED.
+  QueueEvent: "printQueue.event",
+  // Terminal-state events for an active print: completed / failed /
+  // cancelled. Used client-side to fire browser notifications so the
+  // operator hears about a 24-hour print finishing without having the
+  // dashboard tab in focus.
+  PrintJobEvent: "printJob.event",
 };

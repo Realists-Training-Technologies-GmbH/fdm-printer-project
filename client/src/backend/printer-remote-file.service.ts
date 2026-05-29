@@ -27,9 +27,29 @@ export class PrinterRemoteFileService extends BaseService {
     const path = `${ServerApi.printerRemoteFilesRoute}/${printerId}/thumbnail`;
 
     return await this.get<{
-      id: string
+      id?: string
       thumbnailBase64: string
-    }>(path)
+      jobId?: number
+      fileName?: string
+      updatedAt?: string
+      // Server enriches with active-job metadata so the preview dialog can
+      // render "120 g · PLA · 24h 30m" without an extra round-trip. Older
+      // server builds (or printers with no analyzed job) omit this field.
+      job?: {
+        jobId: number
+        fileName: string
+        estimatedSeconds: number | null
+        metadata: {
+          filamentUsedGrams: number | number[] | null
+          filamentType: string | null
+          printerModel: string | null
+          layerHeight: number | null
+          nozzleTemperature: number | null
+          bedTemperature: number | null
+          gcodePrintTimeSeconds: number | null
+        } | null
+      } | null
+    } | null>(path)
   }
 
   static async selectAndPrintFile(

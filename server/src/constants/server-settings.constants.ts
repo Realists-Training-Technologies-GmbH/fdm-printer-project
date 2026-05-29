@@ -46,7 +46,10 @@ export const getDefaultFrontendSettings = (): FrontendSettingsDto => ({
 export const timeoutSettingKey = "timeout";
 export const getDefaultTimeout = (): TimeoutSettingsDto => ({
   apiTimeout: 10000,
-  apiUploadTimeout: 30000,
+  // Large .gcode/.bgcode files (100+ MB) uploaded to PrusaLink's single-
+  // threaded HTTP server over digest auth easily exceed 30s. 10 min covers
+  // 120 MB at ~200 KB/s, the worst throughput we've measured on Buddy XLs.
+  apiUploadTimeout: 600000,
 });
 
 export const getDefaultSettings = () => ({

@@ -13,17 +13,29 @@ import {
   isPrinterPrinting
 } from '@/shared/printer-state.constants'
 
+export interface QueueUploadProgress {
+  printerId: number
+  jobId: number
+  fileName: string
+  /** 0-1, null while we're still in digest-auth / initial connect. */
+  progress: number | null
+  loaded: number
+  total: number | null
+}
+
 interface State {
   printerIds: number[]
   printerEventsById: Record<number, PrinterStateDto>
   socketStatesById: Record<number, SocketState>
+  queueUploadsByPrinterId: Record<number, QueueUploadProgress>
 }
 
 export const usePrinterStateStore = defineStore('PrinterState', {
   state: (): State => ({
     printerIds: [],
     printerEventsById: {},
-    socketStatesById: {}
+    socketStatesById: {},
+    queueUploadsByPrinterId: {}
   }),
   getters: {
     operationalPrintersById() {
@@ -202,6 +214,9 @@ export const usePrinterStateStore = defineStore('PrinterState', {
     setPrinterEvents(printerEvents: Record<number, PrinterStateDto>) {
       this.printerEventsById = printerEvents
       // TODO check id's different from printer events and socket states
+    },
+    setQueueUploads(queueUploads: Record<number, QueueUploadProgress>) {
+      this.queueUploadsByPrinterId = queueUploads ?? {}
     },
     deletePrinterEvents(printerId: number) {
       delete this.printerEventsById[printerId]

@@ -189,7 +189,47 @@ export class PrinterFilesController {
   async getPrinterThumbnail(req: Request, res: Response) {
     const { currentPrinterId } = getScopedPrinter(req);
     const printerThumbnail = await this.printerThumbnailCache.getValue(currentPrinterId);
-    res.send(printerThumbnail);
+    if (!printerThumbnail) {
+      res.send(null);
+      return;
+    }
+
+    // Surface a few slice-time fields so the preview dialog can show
+    // "120 g · PLA · 24h 30m" without an extra fetch. Kept narrow on
+    // purpose: only the fields the dialog displays, since this endpoint
+    // fires on every grid render.
+    let jobInfo: {
+      jobId: number;
+      fileName: string;
+      estimatedSeconds: number | null;
+      metadata: Record<string, unknown> | null;
+    } | null = null;
+    try {
+      const job = await this.printJobService.printJobRepository.findOne({
+        where: { id: printerThumbnail.jobId },
+      });
+      if (job) {
+        const md = (job.metadata ?? {}) as Record<string, unknown>;
+        jobInfo = {
+          jobId: job.id,
+          fileName: job.fileName,
+          estimatedSeconds: (md.gcodePrintTimeSeconds as number) ?? null,
+          metadata: {
+            filamentUsedGrams: md.filamentUsedGrams ?? null,
+            filamentType: md.filamentType ?? null,
+            printerModel: md.printerModel ?? null,
+            layerHeight: md.layerHeight ?? null,
+            nozzleTemperature: md.nozzleTemperature ?? null,
+            bedTemperature: md.bedTemperature ?? null,
+            gcodePrintTimeSeconds: md.gcodePrintTimeSeconds ?? null,
+          },
+        };
+      }
+    } catch (e) {
+      this.logger.debug(`Could not enrich thumbnail with job metadata: ${e}`);
+    }
+
+    res.send({ ...printerThumbnail, job: jobInfo });
   }
 
   @GET()

@@ -202,22 +202,34 @@ export class GCodeParser {
       if (linesRead >= this.maxHeaderLinesToRead && !inThumbnail) break;
       linesRead++;
 
-      // PrusaSlicer thumbnail format
-      // Format 1: ; thumbnail begin 313x173 57100 (width x height dataLength)
-      // Format 2: ; thumbnail begin 313x173 PNG (width x height format)
-      const thumbnailStart = line.match(/;\s*thumbnail begin (\d+)x(\d+)\s*(\w+)?/i);
+      // PrusaSlicer thumbnail formats:
+      //   Legacy:  ; thumbnail begin 313x173 57100      (w x h, dataLength)
+      //   Legacy:  ; thumbnail begin 313x173 PNG        (w x h, format)
+      //   Modern:  ; thumbnail_QOI begin 16x16 820      (format in directive, dataLength)
+      //   Modern:  ; thumbnail_PNG begin 313x173 57100  (format in directive)
+      // The newer PrusaSlicer (XL/MK4) writes the format as a suffix on the
+      // directive name itself, with the third positional arg always being the
+      // byte length. The original regex only matched the legacy form, so
+      // every modern slice's thumbnails dropped on the floor and `_thumbnails`
+      // came back empty — printer grid stayed blank.
+      const thumbnailStart = line.match(/;\s*thumbnail(?:_(\w+))?\s+begin\s+(\d+)x(\d+)\s*(\w+)?/i);
       if (thumbnailStart) {
         inThumbnail = true;
-        currentWidth = parseInt(thumbnailStart[1]);
-        currentHeight = parseInt(thumbnailStart[2]);
+        const directiveFormat = thumbnailStart[1]; // "QOI" / "PNG" / "JPG" / undefined
+        currentWidth = parseInt(thumbnailStart[2]);
+        currentHeight = parseInt(thumbnailStart[3]);
 
-        // Third parameter could be format (PNG/JPG/QOI) or data length (number)
-        const thirdParam = thumbnailStart[3];
-        if (thirdParam && /^(PNG|JPG|JPEG|QOI)$/i.test(thirdParam)) {
-          currentFormat = thirdParam.toUpperCase();
+        if (directiveFormat && /^(PNG|JPG|JPEG|QOI)$/i.test(directiveFormat)) {
+          // Modern: format in the directive name; third positional is length.
+          currentFormat = directiveFormat.toUpperCase();
         } else {
-          // If it's a number or not specified, default to PNG
-          currentFormat = "PNG";
+          // Legacy: third positional could be format or byte length.
+          const thirdParam = thumbnailStart[4];
+          if (thirdParam && /^(PNG|JPG|JPEG|QOI)$/i.test(thirdParam)) {
+            currentFormat = thirdParam.toUpperCase();
+          } else {
+            currentFormat = "PNG";
+          }
         }
 
         thumbnailData = [];
@@ -225,7 +237,8 @@ export class GCodeParser {
       }
 
       if (inThumbnail) {
-        if (line.match(/;\s*thumbnail end/i)) {
+        // End matches both `thumbnail end` and `thumbnail_<fmt> end`.
+        if (line.match(/;\s*thumbnail(?:_\w+)?\s+end/i)) {
           let base64Data = thumbnailData.join("");
           let format = currentFormat.toUpperCase();
 
