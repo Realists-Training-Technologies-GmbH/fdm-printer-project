@@ -22,6 +22,13 @@ export const uploadFileInputSchema = z.object({
   streamFactory: z
     .custom<() => Readable>((val) => typeof val === "function", "Must be a function returning a stream")
     .optional(),
+  // Optional cancellation handle. The caller aborts the controller to stop
+  // an in-flight upload (e.g. user clicked "Cancel transfer" on the tile).
+  // Implementations forward it to axios so the request unwinds cleanly and
+  // the printer-side connection is torn down instead of waiting on TCP
+  // timeout. axios surfaces aborts as `CanceledError` — the caller's catch
+  // is responsible for distinguishing those from real failures.
+  signal: z.custom<AbortSignal>((val) => val instanceof AbortSignal, "Must be an AbortSignal").optional(),
 });
 
 export type UploadFileInput = z.infer<typeof uploadFileInputSchema>;

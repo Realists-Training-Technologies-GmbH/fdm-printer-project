@@ -96,6 +96,19 @@ export class PrintQueueService extends BaseService {
     return this.post<{ message: string; printerId: number; nextJob: QueuedJob | null }>(path)
   }
 
+  /**
+   * Abort an in-flight queue dispatch for this printer. Used when the
+   * tile's "Cancel transfer" button is pressed during STARTING. The
+   * server-side promise unwinds, the job rolls back to QUEUED with
+   * statusReason="Cancelled by user", and a `printQueue.jobSubmissionFailed`
+   * socket event fires with `cancelled: true` so the client can render
+   * the friendly toast.
+   */
+  static async cancelDispatch(printerId: number): Promise<{ message: string; printerId: number }> {
+    const path = `${ServerApi.printQueueRoute}/${printerId}/dispatch`
+    return this.delete<{ message: string; printerId: number }>(path)
+  }
+
   static async submitToPrinter(jobId: number, printerId: number): Promise<{ message: string; jobId: number; printerId: number }> {
     const path = `${ServerApi.printQueueRoute}/${printerId}/submit/${jobId}`
     return this.post<{ message: string; jobId: number; printerId: number }>(path)

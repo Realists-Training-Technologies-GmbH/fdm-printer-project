@@ -1,6 +1,10 @@
 import App from '@/App.vue'
 import router from './router'
 import { createApp } from 'vue'
+// Global "futurism" pass — single stylesheet that retunes cards,
+// buttons, chrome, scrollbars, focus rings, and chip silhouettes
+// without touching individual components. Remove this line to revert.
+import '@/styles/futurism.css'
 import { AxiosError } from 'axios'
 import { useSnackbar } from './shared/snackbar.composable'
 import { getFileDropDirective } from './directives/file-upload.directive'

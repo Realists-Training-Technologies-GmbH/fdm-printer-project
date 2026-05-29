@@ -55,20 +55,6 @@
           class="ml-filter"
           @update:model-value="debouncedSearch"
         />
-        <PrinterTypeFilter
-          v-model="selectedPrinterTypes"
-          label="Printer type"
-          class="ml-filter"
-          @update:model-value="debouncedSearch"
-        />
-        <PrinterTagFilter
-          v-if="tags.length"
-          v-model="selectedTags"
-          :tags="tags"
-          label="Tags"
-          class="ml-filter"
-          @update:model-value="debouncedSearch"
-        />
       </div>
     </v-card>
 
@@ -261,13 +247,11 @@ import { useFloorStore } from '@/store/floor.store'
 import { useDebounceFn } from '@vueuse/core'
 import { formatDate, formatRelativeTime } from '@/utils/date-time.utils'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import MaintenanceLogDetailsDialog from './MaintenanceLogDetailsDialog.vue'
 
 const printerStore = usePrinterStore()
 const floorStore = useFloorStore()
-const { tags, selectedTags, selectedPrinterTypes, filterPrinters, loadTags } = usePrinterFilters()
+const { filterPrinters, loadTags } = usePrinterFilters()
 
 // State
 const logs = ref<PrinterMaintenanceLog[]>([])

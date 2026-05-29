@@ -121,19 +121,6 @@
               <v-icon size="small">grid_view</v-icon>
               Farm status
             </h3>
-            <div class="d-flex align-center ga-2 flex-wrap">
-              <PrinterTagFilter
-                v-model="selectedTags"
-                :tags="tags"
-                label="Tags"
-                style="min-width: 160px; max-width: 220px"
-              />
-              <PrinterTypeFilter
-                v-model="selectedPrinterTypes"
-                label="Type"
-                style="min-width: 160px; max-width: 220px"
-              />
-            </div>
           </div>
 
           <div v-if="totalPrinters > 0" class="dashboard__printer-grid">
@@ -414,8 +401,6 @@ import {
   isPrinterDisabled
 } from '@/shared/printer-state.constants'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import Sparkline from '@/components/Generic/Sparkline.vue'
 import DayBars from '@/components/Generic/DayBars.vue'
 import { useDialog } from '@/shared/dialog.composable'
@@ -441,13 +426,7 @@ const displayLimit = 12
 
 const { data: queueData } = useGlobalQueueQuery()
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  loadTags,
-  filterPrinters
-} = usePrinterFilters()
+const { loadTags, filterPrinters } = usePrinterFilters()
 
 onMounted(async () => {
   await loadTags()

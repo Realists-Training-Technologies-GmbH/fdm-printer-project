@@ -21,6 +21,13 @@ export const vuetify = createVuetify({
       dark: {
         dark: true,
         colors: {
+          // Cockpit-dark canvas — deeper than Vuetify's default #121212 so
+          // primary teal pops as accent. `surface` is the panel/card
+          // baseline, `surface-variant` lifts elevated chrome like the
+          // sticky printer-detail hero.
+          background: '#0A0E14',
+          surface: '#0F151D',
+          'surface-variant': '#162030',
           primary: '#1eb6c3',
           secondary: '#424242',
           accent: '#82B1FF',

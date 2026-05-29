@@ -15,24 +15,18 @@ import {
 interface State {
   printers: PrinterDto[]
   printerFileCache: Record<number, FileDto[]>
-  selectedPrinters: PrinterDto[]
 }
 
 export const usePrinterStore = defineStore('Printers', {
   state: (): State => ({
     printers: [],
-    printerFileCache: {},
-    selectedPrinters: []
+    printerFileCache: {}
   }),
   getters: {
     printer() {
       return (printerId?: number) => {
         return this.printers.find((p) => p.id == printerId)
       }
-    },
-    isSelectedPrinter(state) {
-      return (printerId?: number) =>
-        !!state.selectedPrinters.some((p: PrinterDto) => p.id === printerId)
     },
     printerFiles() {
       return (printerId: number) => this.printerFileCache[printerId]
@@ -58,22 +52,6 @@ export const usePrinterStore = defineStore('Printers', {
         a.name?.toLowerCase()?.localeCompare(b?.name?.toLowerCase()) ? 1 : -1
       )
       return data
-    },
-    toggleSelectedPrinter(printer: PrinterDto) {
-      const printerStateStore = usePrinterStateStore()
-      const selectedPrinterIndex = this.selectedPrinters.findIndex(
-        (sp) => sp.id == printer.id
-      )
-      if (selectedPrinterIndex === -1) {
-        if (printerStateStore.isApiResponding(printer.id)) {
-          this.selectedPrinters.push(printer)
-        }
-      } else {
-        this.selectedPrinters.splice(selectedPrinterIndex, 1)
-      }
-    },
-    clearSelectedPrinters() {
-      this.selectedPrinters = []
     },
     async updatePrinter(
       {

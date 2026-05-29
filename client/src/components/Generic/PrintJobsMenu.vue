@@ -50,20 +50,6 @@
             class="mb-3"
           />
 
-          <!-- Filters -->
-          <div class="d-flex ga-2 mb-3">
-            <PrinterTagFilter
-              v-model="selectedTags"
-              :tags="tags"
-              label="Filter by tags"
-              style="flex: 1"
-            />
-            <PrinterTypeFilter
-              v-model="selectedPrinterTypes"
-              label="Filter by type"
-              style="flex: 1"
-            />
-          </div>
         </v-card-text>
 
         <v-divider/>
@@ -114,29 +100,16 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, watch, onMounted, mergeProps } from "vue";
+import { ref, computed, watch, mergeProps } from "vue";
 import { usePrinterStateStore } from '@/store/printer-state.store'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import { formatDuration } from "@/utils/date-time.utils";
 
 const printerStateStore = usePrinterStateStore()
 const searchString = ref('')
 const menu = ref(false)
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  loadTags,
-  matchesTagFilter,
-  matchesPrinterTypeFilter
-} = usePrinterFilters()
-
-onMounted(async () => {
-  await loadTags()
-})
+const { matchesTagFilter, matchesPrinterTypeFilter } = usePrinterFilters()
 
 const activePrintJobs = computed(() => {
   return printerStateStore.printersWithJob.filter((p) => {

@@ -72,6 +72,14 @@ export class PrinterFilesController {
 
     const files = await printerApi.getFiles(recursive, startDir);
 
+    // Friendly-name enrichment. PrusaHero uploads queue dispatches under the
+    // file's `fileStorageId` (a UUID) so the on-printer filename is opaque —
+    // e.g. `0374647c-….gcode`. Cross-reference each file's basename against
+    // file-storage metadata and surface `_originalFileName` as displayName.
+    // One library scan per listing (O(N) in storage size). The adapter may
+    // have already set displayName (FAT 8.3 shortnames); don't clobber it.
+    await this.enrichWithFriendlyNames(files);
+
     // No filter requested → return the raw listing the printer reported, same
     // shape as before so existing UIs don't break.
     if (!filterCompatible || !currentPrinter) {
@@ -449,5 +457,44 @@ export class PrinterFilesController {
   private getAcceptedFileExtensions(_printerType: number): string[] {
     // PrusaLink (Buddy firmware) accepts both plain G-code and binary G-code.
     return AppConstants.defaultAcceptedGcodeExtensions;
+  }
+
+  /**
+   * Walk a `FilesDto` listing and stamp `displayName` on any file whose
+   * basename (sans extension) matches a known file-storage entry. This is
+   * the bridge between PrusaHero's UUID-on-disk upload convention and the
+   * friendly name the operator typed when uploading. Only files missing a
+   * `displayName` are touched, so adapter-supplied values (FAT 8.3
+   * shortnames) take precedence.
+   */
+  private async enrichWithFriendlyNames(files: {
+    files: { path: string; displayName?: string | null }[];
+  }): Promise<void> {
+    try {
+      // Look-up index keyed by storage id (also matches the UUID-style on-printer
+      // basename). Built once per request — listing every PrusaHero upload is
+      // an O(N) directory scan over the storage library; a Map keeps the
+      // per-file lookup O(1).
+      const all = await this.fileStorageService.listAllFiles();
+      if (all.length === 0) return;
+      const byStorageId = new Map<string, string>();
+      for (const entry of all) {
+        const friendly = (entry.metadata?._originalFileName as string | undefined) ?? entry.fileName;
+        if (typeof friendly === "string" && friendly.trim().length > 0) {
+          byStorageId.set(entry.fileStorageId.toLowerCase(), friendly);
+        }
+      }
+      for (const f of files.files) {
+        if (f.displayName) continue;
+        const base = (f.path.split("/").pop() ?? "").toLowerCase();
+        const ext = extname(base);
+        const stem = ext ? base.slice(0, -ext.length) : base;
+        const hit = byStorageId.get(stem);
+        if (hit) f.displayName = hit;
+      }
+    } catch (error) {
+      // Enrichment is best-effort; a failure here must not break the listing.
+      this.logger.warn(`Friendly-name enrichment failed (continuing): ${errorSummary(error)}`);
+    }
   }
 }

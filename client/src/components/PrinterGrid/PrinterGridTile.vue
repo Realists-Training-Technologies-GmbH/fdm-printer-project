@@ -6,8 +6,6 @@
       :ripple="isOnline"
       :class="{
         'pg-tile--large': largeTilesEnabled,
-        'pg-tile--selected': selected,
-        'pg-tile--unselected': unselected,
         'pg-tile--empty': !printer,
         'pg-tile--draggable': !!printer,
         'pg-tile--offline': !!printer && !isOnline,
@@ -16,7 +14,7 @@
       class="pg-tile rounded-lg"
       :style="!!printer ? { '--state-color': printerStateColor } : undefined"
       elevation="2"
-      @click="selectPrinterPosition()"
+      @click="onTileClick"
       @dragstart="onDragStart"
     >
       <!-- ─── EMPTY SLOT ────────────────────────────────────────── -->
@@ -46,64 +44,17 @@
           :title="`Last update ${livenessAgeSeconds}s ago`"
         />
 
-        <!-- Top row: name + quick actions -->
+        <!-- Top row: printer name. The whole card is the click target —
+             the v-card @click navigates to /printer/:id, so the name is
+             plain text here. The thumbnail still opens the preview
+             dialog via its own @click.stop. -->
         <header class="pg-tile__header">
           <span
-            class="pg-tile__name pg-tile__name--clickable text-truncate"
-            :title="`${printer.name} — click to view print history`"
-            @click.stop.prevent="detailOpen = true"
+            class="pg-tile__name text-truncate"
+            :title="printer.name"
           >
             {{ printer.name }}
           </span>
-          <div class="pg-tile__quick-actions" @click.stop>
-            <v-btn
-              variant="tonal"
-              color="primary"
-              size="x-small"
-              density="comfortable"
-              icon
-              class="pg-tile__qa-btn"
-              @click.prevent.stop="clickInfo()"
-            >
-              <v-icon size="16">folder</v-icon>
-              <v-tooltip activator="parent" location="top">Files</v-tooltip>
-            </v-btn>
-            <v-btn
-              variant="tonal"
-              color="info"
-              size="x-small"
-              density="comfortable"
-              icon
-              class="pg-tile__qa-btn"
-              @click.prevent.stop="clickShowCurrentJob()"
-            >
-              <v-icon size="16">work</v-icon>
-              <v-tooltip activator="parent" location="top">Jobs</v-tooltip>
-            </v-btn>
-            <v-btn
-              :disabled="!isOnline || !isOperational"
-              variant="tonal"
-              size="x-small"
-              density="comfortable"
-              icon
-              class="pg-tile__qa-btn"
-              @click.prevent.stop="clickOpenPrinterControlDialog()"
-            >
-              <v-icon size="16">open_with</v-icon>
-              <v-tooltip activator="parent" location="top">Move &amp; home</v-tooltip>
-            </v-btn>
-            <v-btn
-              variant="tonal"
-              size="x-small"
-              density="comfortable"
-              icon
-              class="pg-tile__qa-btn"
-              @click.prevent.stop="clickOpenSettings()"
-            >
-              <v-icon size="16">settings</v-icon>
-              <v-tooltip activator="parent" location="top">Settings</v-tooltip>
-            </v-btn>
-          </div>
         </header>
 
         <!-- Attention strip: visible whenever this printer needs the user
@@ -126,12 +77,17 @@
         <div class="pg-tile__body">
           <div
             class="pg-tile__thumb"
-            :class="{ 'pg-tile__thumb--clickable': thumbnail?.length }"
-            :title="thumbnail?.length ? 'View larger preview' : undefined"
-            @click.stop.prevent="thumbnail?.length && (previewOpen = true)"
+            :class="{ 'pg-tile__thumb--clickable': previewCanOpen }"
+            :title="previewCanOpen ? (thumbnail?.length ? 'View larger preview' : 'View print info') : undefined"
+            @click.stop.prevent="previewCanOpen && (previewOpen = true)"
           >
+            <!-- Only paint the thumbnail when there's actually an
+                 active print. The TanStack cache keeps the last
+                 fetched preview around, so without this gate the tile
+                 would still show the previous print's image after the
+                 printer goes back to operational/idle. -->
             <v-img
-              v-if="isOnline && thumbnail?.length"
+              v-if="isOnline && thumbnail?.length && (isPrinting || isPaused)"
               :src="'data:image/png;base64,' + (thumbnail ?? '')"
               :width="tileIconThumbnailSize"
               :height="tileIconThumbnailSize"
@@ -199,9 +155,9 @@
 
             <div class="pg-tile__meta">
               <v-tooltip
-                :disabled="!printer?.disabledReason"
+                :disabled="!stateChipTooltip"
                 location="top"
-                :text="printer?.disabledReason ?? ''"
+                :text="stateChipTooltip"
               >
                 <template #activator="{ props }">
                   <v-chip
@@ -231,6 +187,19 @@
               >
                 ↑ {{ uploadProgress.percent }}%
               </span>
+              <v-btn
+                v-if="uploadProgress"
+                size="x-small"
+                variant="text"
+                density="comfortable"
+                icon
+                class="pg-tile__cancel-upload"
+                :loading="cancelInFlight"
+                title="Cancel transfer"
+                @click.stop.prevent="cancelDispatch()"
+              >
+                <v-icon size="14">cancel</v-icon>
+              </v-btn>
               <span
                 v-else-if="currentProgress !== undefined"
                 class="pg-tile__percent"
@@ -351,11 +320,6 @@
       :remaining-seconds="timeRemainingSeconds"
       :metadata="previewMetadata"
     />
-
-    <PrinterDetailDialog
-      v-model="detailOpen"
-      :printer-id="printerId"
-    />
   </div>
 </template>
 
@@ -368,23 +332,20 @@ import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
 import { useRouter } from 'vue-router'
 import { PrintersService } from '@/backend'
 import { usePrinterStore } from '@/store/printer.store'
-import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { useSettingsStore } from '@/store/settings.store'
 import { useFloorStore } from '@/store/floor.store'
 import { interpretStates } from '@/shared/printer-state.constants'
 import { usePrinterStateStore } from '@/store/printer-state.store'
 import { PrinterDto } from '@/models/printers/printer.model'
 import { useSnackbar } from '@/shared/snackbar.composable'
-import { useDialog } from '@/shared/dialog.composable'
+import { PrintQueueService } from '@/backend/print-queue.service'
 import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
 import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { useQueryClient } from '@tanstack/vue-query'
 import PrinterTilePreviewDialog from './PrinterTilePreviewDialog.vue'
-import PrinterDetailDialog from './PrinterDetailDialog.vue'
-import { useFileExplorer } from '@/shared/file-explorer.composable'
 import { dragAppId, INTENT, PrinterPlace, DRAG_EVENTS } from '@/shared/drag.constants'
 import { hasEmergencyStop, hasPrinterControl, hasSerialConnection } from '@/shared/printer-capabilities.constants'
-import logoPng from '@/assets/logo.png'
+import logoPng from '@/assets/logo.svg'
 
 const defaultColor = 'rgba(100,100,100,0.1)'
 
@@ -401,9 +362,6 @@ const printerStore = usePrinterStore()
 const printerStateStore = usePrinterStateStore()
 const floorStore = useFloorStore()
 const settingsStore = useSettingsStore()
-const controlDialog = useDialog(DialogName.PrinterControlDialog)
-const addOrUpdateDialog = useDialog(DialogName.AddOrUpdatePrinterDialog)
-const fileExplorer = useFileExplorer()
 const snackbar = useSnackbar()
 const router = useRouter()
 
@@ -431,7 +389,44 @@ useOnPrinterThumbnailChanged((event) => {
 })
 
 const previewOpen = ref(false)
-const detailOpen = ref(false)
+const cancelInFlight = ref(false)
+
+// We let the preview open whenever there's ANY meaningful thing to show
+// for this printer — a thumbnail OR slice metadata pulled from the
+// active job. Surface-area-wise that means: jobs whose analyzer ran but
+// produced an empty `_thumbnails: []` still get a clickable tile so the
+// user can see filament/time/model without giving up on the click
+// affordance.
+const previewCanOpen = computed(
+  () => !!thumbnail.value?.length || !!thumbnailRecord.value?.job?.metadata,
+)
+
+async function cancelDispatch() {
+  if (!printerId.value || cancelInFlight.value) return
+  cancelInFlight.value = true
+  try {
+    await PrintQueueService.cancelDispatch(printerId.value)
+    // Don't toast on success — the server's `jobSubmissionFailed` event
+    // (with `cancelled: true`) fires the toast through socketio.service
+    // so cancel-by-keystroke and cancel-by-network-drop produce the same
+    // user-facing notification.
+  } catch (e: any) {
+    // Treat 404 / 400 as benign no-ops. 404 means "nothing to cancel"
+    // (the upload already finished or never started). 400 we saw in
+    // production when the route was shadowed by `/:printerId/:jobId` —
+    // routing fixes in the server should keep that from recurring, but
+    // if it does, the user gets nothing useful from a toast.
+    const status = e?.response?.status
+    if (status !== 404 && status !== 400) {
+      snackbar.openErrorMessage({
+        title: 'Could not cancel transfer',
+        subtitle: e?.message ?? 'Unknown error',
+      })
+    }
+  } finally {
+    cancelInFlight.value = false
+  }
+}
 const previewMetadata = computed(() => thumbnailRecord.value?.job?.metadata ?? null)
 const previewEstimatedSeconds = computed(() => thumbnailRecord.value?.job?.estimatedSeconds ?? null)
 const previewFileName = computed(
@@ -458,15 +453,6 @@ const isPaused = computed(() => {
   if (!printerId.value) return false
 
   return printerStateStore.isPrinterPaused(printerId.value)
-})
-
-const selected = computed(() => {
-  if (!printerId.value) return false
-  return printerStore.isSelectedPrinter(printerId.value)
-})
-
-const unselected = computed(() => {
-  return printerStore.selectedPrinters?.length && !selected.value
 })
 
 const preferCancelOverQuickStop = computed(() => {
@@ -554,14 +540,30 @@ const currentProgress = computed(() => {
 // Queue dispatch transfer progress for this printer. Populated server-side
 // while a STARTING-status job's PUT is streaming to PrusaLink — the
 // printer itself reports IDLE during the upload, so `currentProgress`
-// (which reads the firmware's print progress) is unset. We display this
-// instead so the user knows the upload is alive and how close to done.
+// (which reads the firmware's print progress) is unset.
+//
+// Two sources of "transfer %" are available and they routinely disagree:
+//   - axios's progress (`queueUploadsByPrinterId`) — bytes our server has
+//     handed off to the kernel send buffer. Races ahead because TCP
+//     happily accepts bytes faster than PrusaLink can flush them to USB.
+//   - PrusaLink's own `status.transfer.progress` — bytes the printer has
+//     written to its storage. The truth from the user's POV, but only
+//     starts appearing once the printer has acknowledged some data.
+// Prefer the firmware number when present; fall back to axios so the
+// initial moments (handshake, first packet) still show a non-zero bar.
 const uploadProgress = computed<{ percent: number; fileName: string } | null>(() => {
   if (!printerId.value) return null
   const entry = printerStateStore.queueUploadsByPrinterId[printerId.value]
   if (!entry) return null
-  const pct = entry.progress === null ? 0 : Math.round(entry.progress * 100)
-  return { percent: pct, fileName: entry.fileName }
+  const firmwareTransfer = (printerStateStore.printerEventsById[printerId.value]?.current?.payload as any)
+    ?.transfer
+  const firmwarePct =
+    firmwareTransfer && typeof firmwareTransfer.progress === "number" && firmwareTransfer.progress >= 0
+      ? Math.round(firmwareTransfer.progress * 100)
+      : null
+  const axiosPct = entry.progress === null ? 0 : Math.round(entry.progress * 100)
+  const percent = firmwarePct !== null ? firmwarePct : axiosPct
+  return { percent, fileName: entry.fileName }
 })
 
 const timeRemainingSeconds = computed<number | null>(() => {
@@ -599,6 +601,28 @@ const etaClockFormatted = computed<string | null>(() => {
   const mm = String(eta.getMinutes()).padStart(2, '0')
   const sameDay = eta.toDateString() === new Date().toDateString()
   return sameDay ? `${hh}:${mm}` : `${hh}:${mm} +1d`
+})
+
+// PrusaLink's `status_printer.message` mirrored into the polled payload
+// — used to enrich the chip's tooltip with the firmware's own
+// description of the current state, regardless of whether the attention
+// strip is firing. Empty / "ok" / "OK" is treated as no message.
+// Combined tooltip for the state chip. Maintenance reason wins (it's the
+// explicit operator-set explanation); otherwise the firmware message
+// fills in for non-obvious states (errors, transient holds, etc.).
+const stateChipTooltip = computed<string>(() => {
+  if (props.printer?.disabledReason) return props.printer.disabledReason
+  return firmwareMessage.value ?? ''
+})
+
+const firmwareMessage = computed<string | null>(() => {
+  if (!printerId.value) return null
+  const payload = printerStateStore.printerEventsById[printerId.value]?.current?.payload as any
+  const msg = payload?.printerMessage
+  if (!msg || typeof msg !== 'string') return null
+  const trimmed = msg.trim()
+  if (!trimmed || trimmed.toLowerCase() === 'ok') return null
+  return trimmed
 })
 
 // "Last seen Xm ago" hint for offline/unreachable printers. The
@@ -665,9 +689,13 @@ const clickResumePrint = async () => {
   notifyPrintJobsChanged({ printerId: printerId.value, reason: 'tile:resume' })
 }
 
-const clickInfo = () => {
+// The whole tile is the entry point to the per-printer detail view —
+// clicking anywhere on the card that isn't a control button or the
+// thumbnail navigates to /printer/:id. Empty slots stay inert so
+// clicks fall through to the PrinterCreateAction inside.
+const onTileClick = () => {
   if (!props.printer) return
-  fileExplorer.openFileExplorer(props.printer)
+  void router.push({ path: `/printer/${props.printer.id}` })
 }
 
 const clickRefreshSocket = async () => {
@@ -694,35 +722,6 @@ const onDragStart = (ev: DragEvent) => {
   )
 }
 
-const clickOpenSettings = () => {
-  const printer = props.printer
-  if (!printer) return
-  addOrUpdateDialog.openDialog({ id: printer.id })
-}
-
-const clickShowCurrentJob = async () => {
-  if (!printerId.value) {
-    snackbar.openInfoMessage({
-      title: 'No Printer',
-      subtitle: 'No printer to find jobs for'
-    })
-    return
-  }
-
-  await router.push({
-    path: '/jobs',
-    query: { printerId: printerId.value.toString() }
-  })
-}
-
-const clickOpenPrinterControlDialog = async () => {
-  if (!printerId.value || !props.printer) {
-    throw new Error('PrinterId not set, cant open dialog')
-  }
-
-  await controlDialog.openDialog({ printer: props.printer })
-}
-
 const clickQuickStop = async () => {
   if (!printerId.value) return
 
@@ -747,13 +746,6 @@ const clickConnectUsb = async () => {
   await PrintersService.sendPrinterConnectCommand(printerId.value)
 }
 
-const selectPrinterPosition = async () => {
-  if (!props.printer || !printerId.value) {
-    return
-  }
-
-  printerStore.toggleSelectedPrinter(props.printer)
-}
 </script>
 
 <style scoped>
@@ -781,15 +773,6 @@ const selectPrinterPosition = async () => {
 .pg-tile--draggable:active {
   cursor: grabbing;
   opacity: 0.7;
-}
-
-.pg-tile--selected {
-  outline: 2px solid rgb(var(--v-theme-primary));
-  outline-offset: -2px;
-}
-
-.pg-tile--unselected {
-  opacity: 0.55;
 }
 
 .pg-tile--offline {
@@ -896,29 +879,6 @@ const selectPrinterPosition = async () => {
   font-weight: 600;
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.pg-tile__name--clickable {
-  cursor: pointer;
-}
-
-.pg-tile__name--clickable:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  text-decoration-color: rgba(var(--v-theme-primary), 0.5);
-}
-
-.pg-tile__quick-actions {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-}
-
-.pg-tile__qa-btn {
-  /* Slightly bigger hit target than default x-small, keeping the row tight. */
-  width: 26px !important;
-  height: 26px !important;
 }
 
 /* ─── Body (thumbnail + info) ────────────────────────────────── */

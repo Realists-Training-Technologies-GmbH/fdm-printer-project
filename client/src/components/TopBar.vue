@@ -115,7 +115,6 @@
       </v-list>
     </v-menu>
 
-    <HelpOverlay />
   </v-app-bar>
 </template>
 

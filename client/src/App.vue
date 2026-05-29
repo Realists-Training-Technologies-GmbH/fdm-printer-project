@@ -36,7 +36,6 @@
     <YamlImportExportDialog />
     <ManageTagsDialog />
     <FileExplorerSideNav />
-    <BatchReprintDialog />
     <ConfirmDialog />
     <PrinterControlDialog />
     <JsonViewerDialog />

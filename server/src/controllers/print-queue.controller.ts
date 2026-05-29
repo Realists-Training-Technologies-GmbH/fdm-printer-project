@@ -416,6 +416,24 @@ export class PrintQueueController {
   }
 
   @DELETE()
+  @route("/:printerId/dispatch")
+  @before([ParamId("printerId")])
+  async cancelDispatch(req: Request, res: Response) {
+    const printerId = req.local.printerId;
+    const cancelled = this.printQueueService.cancelDispatch(printerId);
+    if (!cancelled) {
+      res.status(404).send({
+        error: "No in-flight dispatch to cancel for this printer",
+      });
+      return;
+    }
+    // The dispatchInBackground catch will roll the job back to QUEUED and
+    // emit `printQueue.jobSubmissionFailed { cancelled: true }`. By the
+    // time the client sees this 202, the chip is already flipping back.
+    res.status(202).send({ message: "Dispatch cancelled", printerId });
+  }
+
+  @DELETE()
   @route("/:printerId/:jobId")
   @before([ParamId("printerId"), ParamId("jobId")])
   async removeFromQueue(req: Request, res: Response) {

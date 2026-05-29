@@ -147,11 +147,20 @@ export function derivePrinterAttention(
   }
 
   if (flags.error || flags.closedOrError) {
+    // The polling adapter mirrors PrusaLink's `status_printer.message` to
+    // `payload.printerMessage`. For errors that field is typically more
+    // descriptive than the bare state.text ("Heater fault: short circuit
+    // on tool 0" vs just "Error") — prefer it when present.
+    const firmwareMessage = (printerState?.current?.payload as any)?.printerMessage
     return {
       needsAttention: true,
       severity: 'critical',
       title: 'Error',
-      message: text || (current as any)?.error || 'The printer reported an error.',
+      message:
+        firmwareMessage ||
+        text ||
+        (current as any)?.error ||
+        'The printer reported an error.',
       icon: 'error',
       kind: 'error',
     }

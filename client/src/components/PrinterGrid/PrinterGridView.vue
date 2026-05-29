@@ -23,8 +23,6 @@
 
       <HomeToolbar/>
 
-      <UploadToolbar/>
-
       <PrinterGrid class="ma-2"/>
     </template>
   </div>
@@ -37,7 +35,6 @@ import { useFloorStore } from '@/store/floor.store'
 import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import HomeToolbar from './HomeToolbar.vue'
-import UploadToolbar from './UploadToolbar.vue'
 import PrinterGrid from './PrinterGrid.vue'
 import PrinterGridSummaryBar from './PrinterGridSummaryBar.vue'
 

@@ -57,7 +57,6 @@ export interface DialogContextTypeMap {
   [DialogName.JobThumbnailViewer]: JobThumbnailViewerContext
   [DialogName.CreateUserDialog]: undefined
   [DialogName.ImportOctoFarmDialog]: undefined
-  [DialogName.BatchReprintDialog]: undefined
   [DialogName.YamlImportExport]: undefined
   [DialogName.ManageTagsDialog]: ManageTagsDialogContext
 }

@@ -67,17 +67,6 @@
           hide-details
           class="pv-filter pv-filter--wide"
         />
-        <PrinterTagFilter
-          v-model="selectedTags"
-          :tags="tags"
-          label="Filter by tags"
-          class="pv-filter"
-        />
-        <PrinterTypeFilter
-          v-model="selectedPrinterTypes"
-          label="Filter by type"
-          class="pv-filter"
-        />
       </div>
     </v-card>
 
@@ -327,8 +316,6 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { PrintersService } from '@/backend/printers.service'
 import PrinterDetails from '@/components/PrinterList/PrinterDetails.vue'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import PrinterUrlAction from '@/components/Generic/Actions/PrinterUrlAction.vue'
 import PrinterSettingsAction from '@/components/Generic/Actions/PrinterSettingsAction.vue'
 import PrinterConnectionAction from '@/components/Generic/Actions/PrinterConnectionAction.vue'
@@ -364,14 +351,7 @@ const featureStore = useFeatureStore()
 
 const addOrUpdatePrinterDialog = useDialog(DialogName.AddOrUpdatePrinterDialog)
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  tagsWithPrinters,
-  loadTags,
-  filterPrinters
-} = usePrinterFilters()
+const { tagsWithPrinters, loadTags, filterPrinters } = usePrinterFilters()
 
 const cameras = ref<any[]>([])
 

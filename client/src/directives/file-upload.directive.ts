@@ -3,7 +3,6 @@ import {
   convertMultiPrinterFileToQueue,
   convertPrinterMultiFileToQueue
 } from '@/utils/uploads-state.utils'
-import { usePrinterStore } from '@/store/printer.store'
 import { useUploadsStore } from '@/store/uploads.store'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { AppContext, Directive } from 'vue'
@@ -14,7 +13,6 @@ const bindDropConditionally = (
   printers: PrinterDto[],
   context?: AppContext | null
 ) => {
-  const printersStore = usePrinterStore()
   const uploadsStore = useUploadsStore()
   const snackbar = useSnackbar()
 
@@ -61,8 +59,6 @@ const bindDropConditionally = (
       }
 
       uploadsStore.queueUploads(convertedUploads)
-
-      printersStore.clearSelectedPrinters()
     }
     return;
   }

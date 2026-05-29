@@ -69,17 +69,6 @@
               class="mb-3"
               @click:clear="filterPrinter = null"
             />
-            <PrinterTagFilter
-              v-model="selectedTags"
-              :tags="tags"
-              label="Filter by tags"
-              class="mb-3"
-            />
-            <PrinterTypeFilter
-              v-model="selectedPrinterTypes"
-              label="Filter by type"
-              class="mb-3"
-            />
             <v-checkbox
               v-model="showOnlyUnavailable"
               label="Only unavailable cameras"
@@ -330,8 +319,6 @@ import { useFileExplorer } from '@/shared/file-explorer.composable'
 import type { PrinterDto } from '@/models/printers/printer.model'
 import { getPrinterTypeName } from '@/shared/printer-types.constants'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
 
 const route = useRoute()
@@ -339,13 +326,7 @@ const printerStore = usePrinterStore()
 const dialog = useDialog(DialogName.AddOrUpdateCameraDialog)
 const fileExplorer = useFileExplorer()
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  loadTags,
-  matchesPrinter
-} = usePrinterFilters()
+const { loadTags } = usePrinterFilters()
 
 // Reactive state
 const searchQuery = ref('')
@@ -424,17 +405,12 @@ const filteredCameras = computed(() => {
       (filterPrinter.value === -1 && !camera.cameraStream.printerId) ||
       camera.cameraStream.printerId === filterPrinter.value
 
-    // Printer filter (tags and type)
-    const matchesPrinterFilter = camera.printer
-      ? matchesPrinter(camera.printer)
-      : (selectedTags.value.length === 0 && selectedPrinterTypes.value.length === 0)
-
     // Unavailable filter
     const matchesAvailability =
       !showOnlyUnavailable.value ||
       cameraErrors[camera.cameraStream.id!]
 
-    return matchesSearch && matchesSpecificPrinter && matchesPrinterFilter && matchesAvailability
+    return matchesSearch && matchesSpecificPrinter && matchesAvailability
   })
 })
 
@@ -447,9 +423,7 @@ const unavailableCount = computed(() => {
 const hasActiveFilters = computed(() => {
   return (
     (filterPrinter.value !== null && filterPrinter.value !== undefined) ||
-    showOnlyUnavailable.value ||
-    selectedTags.value.length > 0 ||
-    selectedPrinterTypes.value.length > 0
+    showOnlyUnavailable.value
   )
 })
 
@@ -458,8 +432,6 @@ const activeFilterCount = computed(() => {
   let count = 0
   if (filterPrinter.value !== null && filterPrinter.value !== undefined) count++
   if (showOnlyUnavailable.value) count++
-  if (selectedTags.value.length > 0) count++
-  if (selectedPrinterTypes.value.length > 0) count++
   return count
 })
 
@@ -497,8 +469,6 @@ watch(
 function clearFilters() {
   filterPrinter.value = null
   showOnlyUnavailable.value = false
-  selectedTags.value = []
-  selectedPrinterTypes.value = []
 }
 
 // Dialog actions

@@ -1,6 +1,4 @@
 import { BaseService } from './base.service'
-import { ServerApi } from '@/backend/server.api'
-import { ReprintFileDto } from '@/models/batch/reprint.dto'
 
 export class BatchService extends BaseService {
   static async batchConnectUsb(printerIds: number[]) {
@@ -16,17 +14,5 @@ export class BatchService extends BaseService {
       printerIds,
       enabled
     })
-  }
-
-  static async batchGetLastPrintedFiles(printerIds: number[]) {
-    const path = ServerApi.batchGetLastPrintedFilesRoute
-    return await this.post<ReprintFileDto[]>(path, { printerIds })
-  }
-
-  static async batchReprintFiles(
-    prints: { printerId: number; path: string }[]
-  ) {
-    const path = ServerApi.batchReprintFilesRoute
-    return await this.post(path, { prints })
   }
 }

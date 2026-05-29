@@ -136,18 +136,6 @@
               class="pj-filter"
               @input="debouncedSearch"
             />
-            <PrinterTypeFilter
-              v-model="selectedPrinterTypes"
-              label="Printer type"
-              class="pj-filter"
-            />
-            <PrinterTagFilter
-              v-if="tags.length"
-              v-model="selectedTags"
-              :tags="tags"
-              label="Tags"
-              class="pj-filter"
-            />
           </div>
 
           <div class="pj-filters__row mt-3">
@@ -978,8 +966,6 @@ import { usePrinterStore } from '@/store/printer.store'
 import { usePrinterStateStore } from '@/store/printer-state.store'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
 import { interpretStates } from '@/shared/printer-state.constants'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
@@ -1059,13 +1045,7 @@ const jobToSubmit = ref<any | null>(null)
 const selectedPrinterForSubmit = ref<number | null>(null)
 const submitting = ref(false)
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  loadTags,
-  matchesPrinter
-} = usePrinterFilters()
+const { loadTags } = usePrinterFilters()
 
 // Additional filter selections
 const selectedPrinterIds = ref<number[]>([])
@@ -1083,8 +1063,6 @@ const activeFiltersCount = computed(() => {
   if (selectedPrinterStates.value.length) count++
   if (selectedMaterialTypes.value.length) count++
   if (selectedPrinterModels.value.length) count++
-  if (selectedPrinterTypes.value.length) count++
-  if (selectedTags.value.length) count++
   if (searchParams.value.startDate && searchParams.value.startDate !== lastWeek.toISOString().split('T')[0]) count++
   if (searchParams.value.endDate && searchParams.value.endDate !== today.toISOString().split('T')[0]) count++
   return count
@@ -1095,8 +1073,6 @@ function resetAdvancedFilters() {
   selectedPrinterStates.value = []
   selectedMaterialTypes.value = []
   selectedPrinterModels.value = []
-  selectedPrinterTypes.value = []
-  selectedTags.value = []
   searchParams.value.startDate = lastWeek.toISOString().split('T')[0]
   searchParams.value.endDate = today.toISOString().split('T')[0]
   debouncedSearch()
@@ -1169,15 +1145,6 @@ const filteredPrintJobs = computed(() => {
   if (selectedPrinterIds.value.length > 0) {
     filtered = filtered.filter(job => {
       return job.printerId && selectedPrinterIds.value.includes(job.printerId)
-    })
-  }
-
-  // Filter by tags and printer type using composable
-  if (selectedTags.value.length > 0 || selectedPrinterTypes.value.length > 0) {
-    filtered = filtered.filter(job => {
-      if (!job.printerId) return false
-      const printer = printerStore.printers.find(p => p.id === job.printerId)
-      return printer && matchesPrinter(printer)
     })
   }
 
@@ -1489,8 +1456,6 @@ const clearFilters = () => {
     pageSize: 25
   }
   selectedPrinterIds.value = []
-  selectedTags.value = []
-  selectedPrinterTypes.value = []
   selectedJobStatuses.value = []
   selectedPrinterStates.value = []
   selectedMaterialTypes.value = []

@@ -1,0 +1,221 @@
+/**
+ * Futurism pass. A single stylesheet pulling the existing teal palette
+ * into a tighter, more "command-deck" aesthetic — without touching any
+ * Vue component. Drop the import in main.ts to revert.
+ *
+ *   - subtle radial vignette on the app canvas
+ *   - hairline teal borders on cards, sharper corners
+ *   - glow shadows on primary buttons, focus rings, selection
+ *   - thin custom scrollbars
+ *   - tabular numerals globally
+ *   - tighter letter-spacing on display text
+ *   - blurred chrome on the nav rail + top bar
+ */
+
+/* ─── App canvas ─────────────────────────────────────────────── */
+
+html,
+body,
+#app {
+  background-color: #0A0E14 !important;
+}
+
+/* Faint teal vignette anchored in the top-left so the cockpit reads as
+   "lit from the console" without distracting from content. */
+.v-application__wrap {
+  background:
+    radial-gradient(
+      1200px 800px at 0% 0%,
+      rgba(30, 182, 195, 0.06),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 600px at 100% 100%,
+      rgba(30, 182, 195, 0.04),
+      transparent 60%
+    ),
+    rgb(var(--v-theme-background));
+}
+
+/* ─── Typography ─────────────────────────────────────────────── */
+
+body {
+  /* Tabular numbers everywhere: temperatures, percentages, ETAs all
+     stay column-aligned across rows without per-component hacks. */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-feature-settings: "tnum";
+  font-feature-settings: "tnum";
+}
+
+h1, h2, h3,
+.text-h1, .text-h2, .text-h3, .text-h4, .text-h5, .text-h6 {
+  letter-spacing: -0.01em;
+}
+
+.text-overline,
+.text-caption {
+  letter-spacing: 0.04em;
+}
+
+/* ─── Selection + focus ──────────────────────────────────────── */
+
+::selection {
+  background: rgba(30, 182, 195, 0.35);
+  color: #fff;
+}
+
+/* Visible focus ring on interactive controls. Vuetify's default focus is
+   subtle; an outline with a soft glow reads as "this is wired up." */
+.v-btn:focus-visible,
+.v-text-field input:focus-visible,
+.v-field--focused .v-field__overlay {
+  outline: 1px solid rgba(30, 182, 195, 0.6);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(30, 182, 195, 0.15);
+}
+
+/* ─── Scrollbars ─────────────────────────────────────────────── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(30, 182, 195, 0.35) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(30, 182, 195, 0.25);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(30, 182, 195, 0.5);
+  background-clip: content-box;
+}
+
+/* ─── Cards ──────────────────────────────────────────────────── */
+
+/* Cards become "panels": hairline teal-tinted border, sharper corners,
+   subtle inner highlight. Only outlined / default elevations get the
+   treatment — explicit `elevation="0"` cards keep the flatter look. */
+.v-card:not(.v-card--variant-text):not(.v-card--variant-plain) {
+  border: 1px solid rgba(30, 182, 195, 0.12);
+  border-radius: 8px;
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.02),
+      rgba(0, 0, 0, 0) 40%
+    );
+}
+
+.v-card.v-card--variant-outlined {
+  border-color: rgba(30, 182, 195, 0.16);
+}
+
+/* ─── Buttons ────────────────────────────────────────────────── */
+
+/* Primary "flat" buttons (the ones that drive an action) get a soft
+   teal glow so they sit forward from the panel. */
+.v-btn--variant-flat.text-primary,
+.v-btn--variant-flat.bg-primary,
+.v-btn--variant-elevated.bg-primary {
+  box-shadow:
+    0 0 0 1px rgba(30, 182, 195, 0.35),
+    0 4px 18px rgba(30, 182, 195, 0.18);
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.v-btn--variant-flat.text-primary:hover,
+.v-btn--variant-flat.bg-primary:hover,
+.v-btn--variant-elevated.bg-primary:hover {
+  box-shadow:
+    0 0 0 1px rgba(30, 182, 195, 0.55),
+    0 6px 24px rgba(30, 182, 195, 0.28);
+  transform: translateY(-1px);
+}
+
+/* Tonal "primary" buttons (less heavy, used for secondary actions) get a
+   restrained edge highlight only. */
+.v-btn--variant-tonal.text-primary {
+  box-shadow: inset 0 0 0 1px rgba(30, 182, 195, 0.22);
+}
+
+/* ─── Chips ──────────────────────────────────────────────────── */
+
+/* Sharper, more "tactical readout" chip silhouette. The state chip on
+   each printer tile already uses these so the change ripples there. */
+.v-chip {
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.v-chip.v-chip--variant-flat.bg-primary,
+.v-chip.v-chip--variant-elevated.bg-primary {
+  box-shadow: 0 0 12px rgba(30, 182, 195, 0.25);
+}
+
+/* ─── Chrome (nav rail + top bar) ────────────────────────────── */
+
+/* Frosted-glass treatment for persistent chrome. The slight saturation
+   bump keeps the teal accents alive even when content scrolls behind. */
+.v-navigation-drawer,
+.v-app-bar,
+.v-toolbar {
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  background-color: rgba(15, 21, 29, 0.78) !important;
+}
+
+/* A 1px luminous edge on the nav rail makes it read as a console
+   bezel instead of a flat surface. */
+.v-navigation-drawer--rail {
+  border-right: 1px solid rgba(30, 182, 195, 0.18) !important;
+}
+
+/* ─── Dialogs ────────────────────────────────────────────────── */
+
+/* Dialogs sit a hair forward from the canvas with the same hairline
+   teal seam the cards use, so the whole surface family feels coherent. */
+.v-dialog > .v-overlay__content > .v-card,
+.v-dialog > .v-overlay__content > .v-sheet {
+  border: 1px solid rgba(30, 182, 195, 0.16);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+/* Backdrop a touch deeper so the dialog reads as the only thing in focus. */
+.v-overlay__scrim {
+  opacity: 0.7 !important;
+  background: #02050A !important;
+}
+
+/* ─── Progress bars ──────────────────────────────────────────── */
+
+/* Progress bars (queue items, print progress, upload progress) get a
+   subtle outer glow that matches their color — reads as "active data
+   line" instead of a static fill. */
+.v-progress-linear .v-progress-linear__determinate {
+  box-shadow: 0 0 8px currentColor;
+  opacity: 0.92;
+}
+
+/* ─── Inputs ─────────────────────────────────────────────────── */
+
+/* Field outlines pick up the same hairline tone so forms feel built
+   from the same parts as the rest of the chrome. */
+.v-field--variant-outlined .v-field__outline {
+  --v-field-border-opacity: 0.16;
+}
+
+.v-field--focused.v-field--variant-outlined .v-field__outline {
+  --v-field-border-opacity: 0.55;
+}

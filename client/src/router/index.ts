@@ -22,6 +22,8 @@ import SoftwareUpgradeSettings from '../components/Settings/SoftwareUpgradeSetti
 import DiagnosticsSettings from '../components/Settings/DiagnosticsSettings.vue'
 import PrintJobsView from '../components/PrintJobs/PrintJobsView.vue'
 import FilesView from '../components/Files/FilesView.vue'
+import MaintenanceView from '../components/Maintenance/MaintenanceView.vue'
+import PrinterDetailView from '../components/PrinterDetail/PrinterDetailView.vue'
 import SlicerSettings from '@/components/Settings/SlicerSettings.vue'
 import ApiKeysSettings from '@/components/Settings/ApiKeysSettings.vue'
 import DebugSocketSettings from "@/components/Settings/DebugSocketSettings.vue";
@@ -174,6 +176,22 @@ const router = createRouter({
       name: RouteNames.Files,
       meta: NeedsAuth,
       component: FilesView
+    },
+    {
+      path: '/maintenance',
+      name: RouteNames.Maintenance,
+      meta: NeedsAuth,
+      component: MaintenanceView
+    },
+    {
+      // Per-printer dedicated detail view — accessed from the grid tile
+      // ("Open full page") and any other place the operator wants to
+      // drill in deeper than the in-grid dialog allows.
+      path: '/printer/:printerId',
+      name: RouteNames.PrinterDetail,
+      meta: NeedsAuth,
+      component: PrinterDetailView,
+      props: (route) => ({ printerId: Number(route.params.printerId) })
     },
     {
       path: '/permission-denied',

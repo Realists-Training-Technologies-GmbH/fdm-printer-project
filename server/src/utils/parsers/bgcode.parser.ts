@@ -185,16 +185,21 @@ export class BGCodeParser {
   private parseTime(value: string | undefined): number | null {
     if (!value) return null;
 
+    // Match the same units PrusaSlicer emits in bgcode metadata:
+    // `1d 10h 27m 13s` (days appear once a print crosses 24 hours).
+    // The old logic skipped `d`, so a 34h estimate landed as 10h.
     let totalSeconds = 0;
-    const hours = new RegExp(/(\d+)h/).exec(value);
-    const minutes = new RegExp(/(\d+)m/).exec(value);
-    const seconds = new RegExp(/(\d+)s/).exec(value);
+    const days = /(\d+)\s*d/i.exec(value);
+    const hours = /(\d+)\s*h/i.exec(value);
+    const minutes = /(\d+)\s*m(?!s)/i.exec(value);
+    const seconds = /(\d+)\s*s/i.exec(value);
 
+    if (days) totalSeconds += Number.parseInt(days[1]) * 86400;
     if (hours) totalSeconds += Number.parseInt(hours[1]) * 3600;
     if (minutes) totalSeconds += Number.parseInt(minutes[1]) * 60;
     if (seconds) totalSeconds += Number.parseInt(seconds[1]);
 
-    if (hours || minutes || seconds) return totalSeconds;
+    if (days || hours || minutes || seconds) return totalSeconds;
 
     const num = Number.parseFloat(value);
     return Number.isNaN(num) ? null : num;

@@ -22,25 +22,6 @@
       </v-btn>
     </v-btn-toggle>
 
-    <!-- Tag filter -->
-    <PrinterTagFilter
-      v-model="selectedTags"
-      :tags="tags"
-      label="Filter by tags"
-      class="ml-4"
-      style="max-width: 300px"
-      @update:model-value="onTagFilterChange"
-    />
-
-    <!-- Printer type filter -->
-    <PrinterTypeFilter
-      v-model="selectedPrinterTypes"
-      label="Filter by type"
-      class="ml-2"
-      style="max-width: 300px"
-      @update:model-value="onPrinterTypeFilterChange"
-    />
-
     <!-- Sort mode toggle -->
     <v-btn-toggle
       :model-value="sortModeIndex"
@@ -134,13 +115,10 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useGridStore } from '@/store/grid.store'
 import { useFloorStore } from '@/store/floor.store'
 import { useSettingsStore } from '@/store/settings.store'
-import { usePrinterFilters } from '@/shared/printer-filter.composable'
-import PrinterTagFilter from '@/components/Generic/Filters/PrinterTagFilter.vue'
-import PrinterTypeFilter from '@/components/Generic/Filters/PrinterTypeFilter.vue'
 import GridSizeControl from '@/components/PrinterGrid/GridSizeControl.vue'
 import GridSettingsMenu from '@/components/PrinterGrid/GridSettingsMenu.vue'
 import { dragAppId, INTENT, PrinterPlace } from '@/shared/drag.constants'
@@ -152,13 +130,6 @@ const gridStore = useGridStore()
 const settingsStore = useSettingsStore()
 const autoPlacing = ref(false)
 
-const {
-  selectedTags,
-  selectedPrinterTypes,
-  tags,
-  loadTags
-} = usePrinterFilters()
-
 const selectedFloorToggleIndex = computed(() => floorStore.selectedFloorIndex)
 
 const floors = computed(() => {
@@ -169,20 +140,8 @@ const sortModeIndex = computed(() => {
   return gridStore.sortMode === 'position' ? 0 : 1
 })
 
-onMounted(async () => {
-  await loadTags()
-})
-
 function changeFloorIndex(index: any) {
   floorStore.changeSelectedFloorByIndex(index)
-}
-
-function onTagFilterChange(tagIds: number[]) {
-  gridStore.setTagFilter(tagIds)
-}
-
-function onPrinterTypeFilterChange(typeIds: number[]) {
-  gridStore.setPrinterTypeFilter(typeIds)
 }
 
 function onSortModeChange(index: number) {

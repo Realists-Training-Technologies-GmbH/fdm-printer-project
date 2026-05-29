@@ -84,6 +84,9 @@ export interface IPrintQueueService {
 
   /** Snapshot of in-flight queue uploads keyed by printerId. */
   getActiveUploads(): Record<number, QueueUploadProgress>;
+
+  /** Abort an in-flight dispatch for a printer. Returns false when none was running. */
+  cancelDispatch(printerId: number): boolean;
 }
 
 /**
@@ -101,6 +104,13 @@ export class PrintQueueService implements IPrintQueueService {
   // periodic update payload — that's how the grid tile's "Transferring…"
   // progress bar gets its data.
   private readonly uploadProgressByPrinterId = new Map<number, QueueUploadProgress>();
+  // AbortController per in-flight dispatch, keyed by printerId. Lets a
+  // user cancel a stuck upload mid-stream from the tile instead of
+  // waiting for the TCP timeout. The `finally` in `dispatchToPrinter`
+  // deletes the entry whether the upload succeeded, failed, or was
+  // aborted, so a stale controller can't accidentally cancel the *next*
+  // job dispatched to the same printer.
+  private readonly dispatchAbortersByPrinterId = new Map<number, AbortController>();
 
   constructor(
     loggerFactory: ILoggerFactory,
@@ -315,6 +325,14 @@ export class PrintQueueService implements IPrintQueueService {
     return out;
   }
 
+  cancelDispatch(printerId: number): boolean {
+    const controller = this.dispatchAbortersByPrinterId.get(printerId);
+    if (!controller) return false;
+    controller.abort();
+    this.logger.log(`Cancelled in-flight dispatch for printer ${printerId} on user request`);
+    return true;
+  }
+
   async resetStrandedDispatches(): Promise<number> {
     const stranded = await this.printJobRepository.find({ where: { status: "STARTING" } });
     if (stranded.length === 0) return 0;
@@ -485,8 +503,39 @@ export class PrintQueueService implements IPrintQueueService {
       return;
     }
 
+    // Single cancellation handle shared across all retry attempts. If the
+    // user cancels, every in-flight axios request unwinds at once and the
+    // retry loop short-circuits in the catch (CanceledError → !transient).
+    const aborter = new AbortController();
+    this.dispatchAbortersByPrinterId.set(printerId, aborter);
+
     try {
-      await this.dispatchToPrinter(printerId, job);
+      // Retry transient failures — network blips, 5xx, the printer's HTTP
+      // server momentarily dropping during high load — without the user
+      // having to press "process next" again. Backoff schedule is short
+      // and bounded; permanent errors (4xx, 507 Insufficient Storage,
+      // explicit cancels) bypass the loop and bubble straight out.
+      const RETRY_DELAYS_MS = [2000, 5000];
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          await this.dispatchToPrinter(printerId, job, aborter.signal);
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!this.isTransientDispatchError(error) || attempt === RETRY_DELAYS_MS.length) {
+            throw error;
+          }
+          const delay = RETRY_DELAYS_MS[attempt];
+          this.logger.warn(
+            `Dispatch attempt ${attempt + 1} for job ${jobId} on printer ${printerId} failed transiently ` +
+              `(${error instanceof Error ? error.message : "unknown"}). Retrying in ${delay}ms.`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+      if (lastError) throw lastError;
 
       // Re-read the row — the poll observer may have already promoted it to
       // PRINTING based on the printer's own status. Don't clobber that, but
@@ -512,18 +561,112 @@ export class PrintQueueService implements IPrintQueueService {
       // stays in its slot.
       job = (await this.printJobRepository.findOne({ where: { id: jobId } })) ?? job;
       job.status = "QUEUED";
-      job.statusReason = `Print submission failed: ${error instanceof Error ? error.message : "Unknown error"}`;
+
+      // Distinguish user-initiated aborts from real failures — axios maps
+      // an aborted request to `code === 'ERR_CANCELED'`. The job still
+      // rolls back to QUEUED either way (the file didn't make it to the
+      // printer), but the statusReason and the emitted event let the UI
+      // show "Cancelled by user" instead of a scary stack trace.
+      const wasCancelled =
+        (error as { code?: string; name?: string })?.code === "ERR_CANCELED" ||
+        (error as { name?: string })?.name === "CanceledError";
+      if (wasCancelled) {
+        job.statusReason = "Cancelled by user — upload aborted mid-transfer.";
+      } else {
+        job.statusReason = `Print submission failed: ${this.extractFriendlyError(error)}`;
+      }
       await this.printJobRepository.save(job);
-      this.logger.error(`Failed to submit job ${jobId} to printer ${printerId} - left in queue for retry`, error);
+      if (wasCancelled) {
+        this.logger.log(`Dispatch of job ${jobId} to printer ${printerId} cancelled by user`);
+      } else {
+        this.logger.error(`Failed to submit job ${jobId} to printer ${printerId} - left in queue for retry`, error);
+      }
       this.eventEmitter2.emit("printQueue.jobSubmissionFailed", {
         printerId,
         jobId,
         reason: job.statusReason,
+        cancelled: wasCancelled,
       });
+    } finally {
+      // Whether the dispatch succeeded, failed, or was aborted, the
+      // controller's job is done — drop it from the map so the cancel
+      // endpoint reports "no in-flight dispatch" and the next dispatch
+      // creates a fresh aborter.
+      this.dispatchAbortersByPrinterId.delete(printerId);
     }
   }
 
-  private async dispatchToPrinter(printerId: number, job: PrintJob): Promise<void> {
+  /**
+   * Pull a human-readable single sentence out of whatever the upload
+   * pipeline threw. `ExternalServiceError` stringifies its full response
+   * object — including stack — into `.message`, so naively setting
+   * `statusReason = error.message` puts a wall of JSON in the operator's
+   * toast (we saw this with the 507 today). Prefer the friendly `error`
+   * field that PrusaLinkApi already curates for each HTTP status, then
+   * fall back to `axios.response.data.error/title/message`, then to the
+   * plain `error.message`. Final fallback strips JSON-ish residue so
+   * even a worst-case error stays one short line.
+   */
+  private extractFriendlyError(error: unknown): string {
+    if (!error) return "Unknown error";
+    if (typeof error === "string") return error;
+    const e = error as {
+      error?: { error?: unknown } | string;
+      message?: string;
+      response?: { data?: { error?: string; title?: string; message?: string } };
+    };
+
+    // ExternalServiceError wraps the curated friendly string at `.error.error`.
+    const curated = (e.error as { error?: unknown })?.error;
+    if (typeof curated === "string" && curated.trim()) return curated.trim();
+
+    // Raw axios path — the printer's response body sometimes carries a
+    // ready-to-show string under `error` / `title` / `message`.
+    const resp = e.response?.data;
+    if (resp) {
+      if (typeof resp.error === "string" && resp.error.trim()) return resp.error.trim();
+      if (typeof resp.title === "string" && resp.title.trim()) return resp.title.trim();
+      if (typeof resp.message === "string" && resp.message.trim()) return resp.message.trim();
+    }
+
+    // Last-resort: extract the first line of `.message` and reject things
+    // that look like JSON dumps (start with `{`) so even an unexpected
+    // shape doesn't paste a stack into the toast.
+    const msg = (e.message ?? "").trim();
+    if (!msg) return "Unknown error";
+    if (msg.startsWith("{")) return "Print submission failed (see server logs for details).";
+    const firstLine = msg.split(/\r?\n/)[0]!.trim();
+    return firstLine || "Unknown error";
+  }
+
+  /**
+   * Returns true for errors worth a quick retry: socket-level disconnects
+   * and 5xx-class responses where the next attempt has a reasonable
+   * chance of succeeding. Explicit cancels and 4xx (incl. 507
+   * Insufficient Storage) are intentionally excluded — re-uploading
+   * 120 MB to a full USB will just fail again.
+   */
+  private isTransientDispatchError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const e = error as { code?: string; name?: string; response?: { status?: number } };
+    if (e.code === "ERR_CANCELED" || e.name === "CanceledError") return false;
+    const status = e.response?.status;
+    if (typeof status === "number") {
+      // 502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout —
+      // the printer's HTTP server is overloaded but probably recovers.
+      return status === 502 || status === 503 || status === 504;
+    }
+    // Network-level errors with no HTTP response at all.
+    return (
+      e.code === "ECONNRESET" ||
+      e.code === "ETIMEDOUT" ||
+      e.code === "ENOTFOUND" ||
+      e.code === "ECONNABORTED" ||
+      e.code === "EAI_AGAIN"
+    );
+  }
+
+  private async dispatchToPrinter(printerId: number, job: PrintJob, signal?: AbortSignal): Promise<void> {
     const printerApi = this.printerApiFactory.getById(printerId);
     const fileName = job.fileName;
 
@@ -584,10 +727,13 @@ export class PrintQueueService implements IPrintQueueService {
           startPrint: true,
           targetPath: PRINTER_TEMP_FOLDER,
           uploadToken,
+          signal,
         });
       } finally {
         // Always detach the listener AND clear the cache slot so a failed
-        // upload doesn't leave a stale "53%" indicator on the tile.
+        // upload doesn't leave a stale "53%" indicator on the tile. The
+        // aborter is owned by `dispatchInBackground` (it spans all retry
+        // attempts), so we don't touch it here.
         this.eventEmitter2.off(uploadProgressEvent(uploadToken), onProgress);
         this.uploadProgressByPrinterId.delete(printerId);
       }

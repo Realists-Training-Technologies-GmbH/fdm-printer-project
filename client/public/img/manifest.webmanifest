@@ -1,12 +1,12 @@
 {
-    "theme_color": "#9B0505",
-    "background_color": "#424242",
+    "theme_color": "#E04E00",
+    "background_color": "#1A1A1A",
     "display": "browser",
     "scope": "/",
     "start_url": "/",
-    "name": "FDM Monster",
-    "short_name": "FDM Monster",
-    "description": "Visit our github on https://github.com/fdm-monster/fdm-monster",
+    "name": "PrusaHero",
+    "short_name": "PrusaHero",
+    "description": "PrusaHero — PrusaLink print farm command",
     "icons": [
         {
             "src": "/img/icons/android-chrome-192x192.png",

@@ -75,7 +75,7 @@
 </template>
 
 <script lang="ts" setup>
-import imgLogo from '@/assets/logo.png'
+import imgLogo from '@/assets/logo.svg'
 
 const primaryItems: Array<[string, string, string]> = [
   ['dashboard', 'Dashboard', '/dashboard'],
@@ -84,6 +84,7 @@ const primaryItems: Array<[string, string, string]> = [
   ['mdi:mdi-camera', 'Cameras', '/cameras'],
   ['mdi:mdi-history', 'Print Jobs', '/jobs'],
   ['mdi:mdi-folder', 'Files', '/files'],
+  ['build', 'Maintenance', '/maintenance'],
 ]
 
 const secondaryItems: Array<[string, string, string]> = [

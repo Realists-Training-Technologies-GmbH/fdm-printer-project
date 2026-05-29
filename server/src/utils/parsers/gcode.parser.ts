@@ -28,6 +28,20 @@ export class GCodeParser {
     const metadata = await this.extractMetadata(filePath);
     const thumbnails = await this.extractThumbnails(filePath);
 
+    // Multi-tool prints (XL, MMU2/3) emit comma-separated lists for
+    // per-extruder metadata: "100.5, 50.3, 30.1". parseFloat only
+    // captures the first number, so without MMU detection the total
+    // filament reported for a 3-tool print would be ~1/3 of reality.
+    // Use the same heuristic the bgcode parser uses: if ANY of these
+    // fields carries multiple comma-separated values, treat the file
+    // as MMU and sum where appropriate.
+    const isMmu =
+      this.isMmuData(metadata.nozzle_diameter) ||
+      this.isMmuData(metadata.temperature) ||
+      this.isMmuData(metadata.filament_used_mm) ||
+      this.isMmuData(metadata.bed_temperature) ||
+      this.isMmuData(metadata.filament_type, ";");
+
     const normalized: GCodeMetadata = {
       fileName,
       fileFormat: "gcode",
@@ -35,19 +49,29 @@ export class GCodeParser {
       gcodePrintTimeSeconds: this.parseTime(
         metadata.estimated_printing_time_normal_mode || metadata.estimated_printing_time || metadata.print_time,
       ),
-      nozzleDiameterMm: this.parseFloat(metadata.nozzle_diameter),
-      filamentDiameterMm: this.parseFloat(metadata.filament_diameter),
-      filamentDensityGramsCm3: this.parseFloat(metadata.filament_density),
-      filamentUsedMm: this.parseFloat(metadata.filament_used_mm),
-      filamentUsedCm3: this.parseFloat(metadata.filament_used_cm3),
-      filamentUsedGrams: this.parseFloat(metadata.filament_used_g),
-      totalFilamentUsedGrams: this.parseFloat(metadata.total_filament_used_g || metadata.filament_used_g),
+      nozzleDiameterMm: this.parseFirstValue(metadata.nozzle_diameter),
+      filamentDiameterMm: this.parseFirstValue(metadata.filament_diameter),
+      filamentDensityGramsCm3: this.parseFirstValue(metadata.filament_density),
+      filamentUsedMm: this.parseFirstValue(metadata.filament_used_mm),
+      filamentUsedCm3: this.parseFirstValue(metadata.filament_used_cm3),
+      filamentUsedGrams: this.parseFirstValue(metadata.filament_used_g),
+      // `total_filament_used_g` is sometimes present as a single sum;
+      // when it's missing we have to sum the per-tool list ourselves.
+      totalFilamentUsedGrams: isMmu
+        ? this.sumNumberArray(this.parseNumberArray(metadata.total_filament_used_g || metadata.filament_used_g))
+        : this.parseFirstValue(metadata.total_filament_used_g || metadata.filament_used_g),
       layerHeight: this.parseFloat(metadata.layer_height),
       firstLayerHeight: this.parseFloat(metadata.first_layer_height || metadata.initial_layer_height),
-      bedTemperature: this.parseFloat(metadata.bed_temperature || metadata.first_layer_bed_temperature),
-      nozzleTemperature: this.parseFloat(metadata.temperature || metadata.first_layer_temperature),
+      bedTemperature: this.parseFirstValue(metadata.bed_temperature || metadata.first_layer_bed_temperature),
+      nozzleTemperature: this.parseFirstValue(metadata.temperature || metadata.first_layer_temperature),
       fillDensity: metadata.fill_density || null,
-      filamentType: metadata.filament_type || null,
+      // PrusaSlicer separates filament_type with `;` on MMU files
+      // ("PLA;PETG;ABS"). Strip into an array so downstream readers can
+      // tell a single material apart from a multi-color setup; the
+      // existing-string fallback covers all single-tool prints.
+      filamentType: isMmu
+        ? ((this.parseStringArray(metadata.filament_type, ";") as any) ?? metadata.filament_type ?? null)
+        : metadata.filament_type || null,
       printerModel: metadata.printer_model || metadata.printer_name || null,
       slicerVersion: metadata.generated_by || metadata.slicer_version || null,
       maxLayerZ: this.parseFloat(metadata.max_layer_z),
@@ -288,21 +312,74 @@ export class GCodeParser {
     return isNaN(num) ? null : num;
   }
 
+  // ── MMU / multi-tool helpers — same contract as bgcode.parser.ts ──
+  // PrusaSlicer emits comma-separated lists for per-extruder values
+  // on multi-tool prints (XL, MMU2/3). Plain parseFloat happily reads
+  // only the first item and silently drops the rest, so we route
+  // through these helpers whenever a field might be MMU.
+
+  private parseFirstValue(value: string | undefined): number | null {
+    if (!value) return null;
+    const first = value.split(",")[0].trim();
+    const num = parseFloat(first);
+    return isNaN(num) ? null : num;
+  }
+
+  private parseNumberArray(value: string | undefined): number[] | null {
+    if (!value) return null;
+    const values = value
+      .split(",")
+      .map((v) => parseFloat(v.trim()))
+      .filter((n) => !isNaN(n));
+    return values.length > 0 ? values : null;
+  }
+
+  private parseStringArray(value: string | undefined, separator: string = ";"): string[] | null {
+    if (!value) return null;
+    const values = value
+      .split(separator)
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+    return values.length > 0 ? values : null;
+  }
+
+  private isMmuData(value: string | undefined, separator: string = ","): boolean {
+    if (!value) return false;
+    const parts = value
+      .split(separator)
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+    return parts.length > 1;
+  }
+
+  private sumNumberArray(values: number[] | null): number | null {
+    if (!values || values.length === 0) return null;
+    return values.reduce((sum, val) => sum + val, 0);
+  }
+
   private parseTime(value: string | undefined): number | null {
     if (!value) return null;
 
-    // Try parsing as duration string FIRST (e.g., "1h 31m 17s" or "19m 58s")
-    const match = value.match(/(?:(\d+)h)?(?:\s*(\d+)m)?(?:\s*(\d+)s)?/);
-    if (match && (match[1] || match[2] || match[3])) {
-      const hours = parseInt(match[1] || "0");
-      const minutes = parseInt(match[2] || "0");
-      const secs = parseInt(match[3] || "0");
-      return hours * 3600 + minutes * 60 + secs;
+    // Try parsing as duration string FIRST (e.g., "1d 10h 27m 13s",
+    // "1h 31m 17s", or "19m 58s"). PrusaSlicer adds `Xd` once a print
+    // crosses 24 hours; the old regex stopped at `h` and fell through
+    // to parseFloat, which then read just the leading "1" from "1d …"
+    // and returned 1 second instead of a 30+ hour estimate.
+    const days = value.match(/(\d+)\s*d/i);
+    const hours = value.match(/(\d+)\s*h/i);
+    const minutes = value.match(/(\d+)\s*m(?!s)/i);
+    const seconds = value.match(/(\d+)\s*s/i);
+    if (days || hours || minutes || seconds) {
+      const d = parseInt(days?.[1] ?? "0");
+      const h = parseInt(hours?.[1] ?? "0");
+      const m = parseInt(minutes?.[1] ?? "0");
+      const s = parseInt(seconds?.[1] ?? "0");
+      return d * 86400 + h * 3600 + m * 60 + s;
     }
 
     // Fallback to parsing as plain seconds
-    const seconds = parseFloat(value);
-    if (!isNaN(seconds)) return seconds;
+    const plain = parseFloat(value);
+    if (!isNaN(plain)) return plain;
 
     return null;
   }

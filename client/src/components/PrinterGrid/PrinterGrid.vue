@@ -34,13 +34,6 @@
       <v-icon size="large" class="mr-2">delete_forever</v-icon>
       <span class="text-h6">Drop here to remove from grid</span>
     </div>
-
-    <img
-      alt="PrusaHero Background"
-      class="grid-bg-img align-content-center"
-      src="/img/logo.svg"
-      style="opacity: 0.08; pointer-events: none"
-    />
   </div>
 </template>
 
@@ -107,7 +100,11 @@ const largeTileMode = computed(() => settingsStore.largeTiles)
 const totalCells = computed(() => rows.value * columns.value)
 const gridStyle = computed(() => ({
   display: 'grid',
-  gridTemplateColumns: `repeat(${ columns.value }, 1fr)`,
+  // `minmax(0, 1fr)` instead of bare `1fr` is the canonical fix for
+  // long-content cells overflowing their track — without the explicit
+  // 0 minimum the grid algorithm respects each cell's min-content size
+  // and lets it push the column wider than 1fr.
+  gridTemplateColumns: `repeat(${ columns.value }, minmax(0, 1fr))`,
   gap: props.gap
 }))
 
@@ -182,18 +179,31 @@ async function onDropRemove(ev: DragEvent) {
 
 .printer-cell {
   padding: 4px;
+  /* Grid items default to min-width: auto, which equals the content's
+     intrinsic width. With a long file name in the tile that pushes the
+     cell past its `1fr` track and clips into the next column. Forcing
+     min-width: 0 lets text-truncate inside the tile actually kick in. */
+  min-width: 0;
 }
 
 .printer-cell-large {
   padding: 8px;
 }
 
-.grid-bg-img {
-  position: fixed;
-  height: 100vh;
-  top: 50vh;
-  width: 600%;
-  left: -250%;
-  filter: grayscale(100%);
+/* Responsive collapse: on a narrow viewport the user's chosen column
+   count would jam tiles together. Below 900px, fall back to a single
+   column regardless of grid-template-columns set inline. Tablet-sized
+   screens (≤ 1280px) drop to a 2-column ceiling so denser layouts
+   don't clip on a laptop side-by-side window. */
+@media (max-width: 900px) {
+  .printer-grid {
+    grid-template-columns: 1fr !important;
+  }
 }
+@media (min-width: 901px) and (max-width: 1280px) {
+  .printer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
 </style>

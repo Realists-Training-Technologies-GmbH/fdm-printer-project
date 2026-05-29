@@ -87,9 +87,15 @@ export async function getHttpClient(
           error
         )
         captureException(error)
+        // Preserve the server's response so callers can surface the real
+        // reason (e.g. validation messages from 400s). Flattening to just
+        // {message, stack} here swallowed `response.data.message` and left
+        // snackbars showing the generic "Request failed with status code N".
         return Promise.reject({
           message: `${error.message} - URL ${config?.url}`,
-          stack: error.stack
+          stack: error.stack,
+          response,
+          status: response.status,
         })
       }
 

@@ -618,14 +618,21 @@ export class PrusaLinkApi implements IPrinterApi {
 
     // Refuse the upload up-front if the internal storage is too small to hold
     // the file. We treat status as best-effort — if the probe fails, let the
-    // actual PUT surface the error.
+    // actual PUT surface the error. The previous check excluded `freeSpace
+    // === 0` (via `freeSpace > 0`), which is exactly the case we want to
+    // catch: a *completely* full USB returns 0 from /api/v1/status, so the
+    // upload was being allowed to start and only 507'ing mid-stream. Now we
+    // accept any non-negative number — the storage list already filters out
+    // read-only mounts (which legitimately omit `free_space`).
     try {
       const status = await this.getStatus();
       const freeSpace = this.getStorageList(status).find((s) => !s.read_only)?.free_space;
-      if (typeof freeSpace === "number" && freeSpace > 0 && freeSpace < validated.contentLength) {
+      if (typeof freeSpace === "number" && freeSpace < validated.contentLength) {
+        const freeMb = (freeSpace / (1024 * 1024)).toFixed(1);
+        const needMb = (validated.contentLength / (1024 * 1024)).toFixed(1);
         throw new ExternalServiceError(
           {
-            error: `Not enough free space on the printer storage: needs ${validated.contentLength} bytes but only ${freeSpace} are available.`,
+            error: `Not enough free space on the printer storage: needs ${needMb} MB but only ${freeMb} MB are available. Delete old files from the printer to make room.`,
             statusCode: 507,
             data: { freeSpace, requiredBytes: validated.contentLength },
             success: false,
@@ -676,7 +683,7 @@ export class PrusaLinkApi implements IPrinterApi {
     const putWithPriming = async (stream: unknown) => {
       const client = buildUploadClient();
       await client.get("/api/version").catch(() => undefined);
-      return client.put(uploadPath, stream, { headers: uploadHeaders });
+      return client.put(uploadPath, stream, { headers: uploadHeaders, signal: validated.signal });
     };
 
     // Legacy standalone PrusaLink (MK3/MK2.5 Einsy shim, server 0.x) returns
@@ -701,6 +708,7 @@ export class PrusaLinkApi implements IPrinterApi {
       await client.get("/api/version").catch(() => undefined);
       return client.post(`/api/files/${storage}`, form, {
         headers: { ...form.getHeaders(), "Content-Length": length.toString() },
+        signal: validated.signal,
       });
     };
 

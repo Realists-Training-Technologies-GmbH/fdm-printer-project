@@ -30,6 +30,10 @@ interface QueueEventPayload {
   printerId?: number;
   jobId?: number;
   reason?: string;
+  // Server sets `cancelled: true` on the failed event when the dispatch
+  // was aborted by user request (vs. a real upload failure). Client uses
+  // it to pick a friendlier toast — same code path, different copy.
+  cancelled?: boolean;
 }
 
 interface PrinterThumbnailChangedPayload {
@@ -275,12 +279,30 @@ export class SocketIoService {
     // POST /process with 202 so the user has no way of knowing whether the
     // upload eventually succeeded without this event.
     appSocketIO.on(IO_MESSAGES.QueueEvent, (data: QueueEventPayload) => {
-      const printerLabel = data.printerId ? `printer ${data.printerId}` : "printer";
+      const printerLabel = data.printerId
+        ? this.printerStore.printer(data.printerId)?.name ?? `printer ${data.printerId}`
+        : "printer";
       if (data.kind === "failed") {
-        this.snackbar.openErrorMessage({
-          title: `Dispatch to ${printerLabel} failed`,
-          subtitle: data.reason ?? "Unknown error",
-        });
+        if (data.cancelled) {
+          // Cancel-by-user is informational, not an error. Match the
+          // "X cancelled" wording used elsewhere for terminal cancels.
+          this.snackbar.openInfoMessage({
+            title: `Dispatch to ${printerLabel} cancelled`,
+            warning: true,
+          });
+        } else {
+          // `data.reason` is the persisted `statusReason` — usually
+          // "Print submission failed: <friendly>". The toast title
+          // already says "failed", so strip the redundant prefix and
+          // any leaked JSON noise before showing.
+          const cleanReason = (data.reason ?? "")
+            .replace(/^Print submission failed:\s*/i, "")
+            .trim();
+          this.snackbar.openErrorMessage({
+            title: `Dispatch to ${printerLabel} failed`,
+            subtitle: cleanReason || "Unknown error",
+          });
+        }
       } else if (data.kind === "submitted") {
         this.snackbar.openInfoMessage({
           title: `Dispatched job to ${printerLabel}`,

@@ -133,7 +133,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { BrandingService, type BrandingLogoStatus } from '@/backend/branding.service'
 import { useSnackbar } from '@/shared/snackbar.composable'
-import defaultLogo from '@/assets/logo.png'
+import defaultLogo from '@/assets/logo.svg'
 
 const snackbar = useSnackbar()
 

@@ -34,14 +34,39 @@ import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import type { ThumbnailInfo } from '@/backend/file-storage.service'
 
-const props = defineProps<{
-  fileStorageId: string | null
-  thumbnails: ThumbnailInfo[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    fileStorageId: string | null
+    thumbnails: ThumbnailInfo[]
+    // When true, force the largest available thumbnail (by pixel count)
+    // instead of the "closest to 400×400" selector. Used by the file
+    // details dialog where the slot is hero-sized and the auto-picked
+    // mid-size renders soft.
+    preferLargest?: boolean
+  }>(),
+  { preferLargest: false },
+)
 
 const fileStorageIdRef = computed(() => props.fileStorageId)
 const thumbnailsRef = computed(() => props.thumbnails)
-const { data: thumbnailUrl, isLoading } = useFileStorageThumbnailQuery(fileStorageIdRef, thumbnailsRef)
+
+// Override the query's auto-selector when the parent asks for the
+// largest. The cell otherwise picks ~400px which is right for the
+// tile/list rows but too small in the 360px details hero.
+const preferredIndex = computed<number | undefined>(() => {
+  if (!props.preferLargest || !props.thumbnails?.length) return undefined
+  let best = props.thumbnails[0]
+  for (const t of props.thumbnails) {
+    if (t.width * t.height > best.width * best.height) best = t
+  }
+  return best.index
+})
+
+const { data: thumbnailUrl, isLoading } = useFileStorageThumbnailQuery(
+  fileStorageIdRef,
+  thumbnailsRef,
+  preferredIndex,
+)
 
 const thumbnailViewerDialog = useDialog(DialogName.JobThumbnailViewer)
 
