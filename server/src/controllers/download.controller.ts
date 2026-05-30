@@ -6,7 +6,7 @@ import { FileStorageFolderService } from "@/services/file-storage-folder.service
 import { DownloadTicketService } from "@/services/download-ticket.service";
 import type { ILoggerFactory } from "@/handlers/logger-factory";
 import { LoggerService } from "@/handlers/logger";
-import AdmZip from "adm-zip";
+import archiver from "archiver";
 
 /**
  * Public, ticket-gated downloads. Unlike FileStorageController this has NO
@@ -57,10 +57,13 @@ export class DownloadController {
   }
 
   /**
-   * Build and send a ZIP of a folder subtree, rebuilding the folder hierarchy
-   * inside the archive from each file's original name + relative path. Mirrors
-   * the previous authenticated export so behaviour is unchanged — only the
-   * access path (ticket) differs.
+   * Stream a ZIP of a folder subtree to the response, rebuilding the folder
+   * hierarchy inside the archive from each file's original name + relative
+   * path. Uses `archiver` with per-file read streams so memory stays constant
+   * regardless of total size — the previous AdmZip version buffered every file
+   * AND the whole archive in memory, which OOM-killed the server on large
+   * folders (e.g. 8 GB). No Content-Length: the size isn't known up front when
+   * streaming, so the response is chunked.
    */
   private async streamFolderZip(res: Response, folderPath: string) {
     const all = await this.fileStorageService.listAllFiles();
@@ -70,21 +73,36 @@ export class DownloadController {
       return fp === folderPath || fp.startsWith(folderPath + "/");
     });
 
-    const zip = new AdmZip();
+    const folderName = FileStorageFolderService.nameOf(folderPath) || "folder";
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${folderName}.zip"`);
+
+    // store: no compression — gcode/bgcode are already near-incompressible and
+    // these archives are huge, so spending CPU to barely shrink them isn't
+    // worth it; streaming with constant memory is the win.
+    const archive = archiver("zip", { store: true });
+
+    archive.on("error", (err) => {
+      this.logger.error(`Folder ZIP stream failed for ${folderPath}: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).send({ error: "Failed to build archive" });
+      } else {
+        res.destroy(err);
+      }
+    });
+    // If the client aborts (closes the tab / cancels), stop reading files.
+    res.on("close", () => archive.destroy());
+
+    archive.pipe(res);
+
     for (const f of inside) {
-      const buffer = await this.fileStorageService.getFile(f.fileStorageId);
       const fp = f.metadata?._folderPath ?? folderPath;
       const relDir = fp === folderPath ? "" : fp.substring(folderPath.length + 1);
       const name = f.metadata?._originalFileName || f.fileName;
       const entryPath = relDir ? `${relDir}/${name}` : name;
-      zip.addFile(entryPath, buffer);
+      archive.append(this.fileStorageService.readFileStream(f.fileStorageId), { name: entryPath });
     }
 
-    const folderName = FileStorageFolderService.nameOf(folderPath) || "folder";
-    const archive = zip.toBuffer();
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${folderName}.zip"`);
-    res.setHeader("Content-Length", archive.length.toString());
-    res.send(archive);
+    await archive.finalize();
   }
 }
