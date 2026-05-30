@@ -62,6 +62,11 @@ export class SocketIoTask {
     this.eventEmitter2.on("printJob.cancelled", (data) =>
       this.socketIoGateway.send(IO_MESSAGES.PrintJobEvent, { kind: "cancelled", ...data }),
     );
+
+    // Intake inbox changed — a file arrived via the API or an item was
+    // resolved. The client refreshes its list + menu badge, and toasts new
+    // arrivals. Payload carries `kind` ("created" | "resolved") and the id.
+    this.eventEmitter2.on("intake.changed", (data) => this.socketIoGateway.send(IO_MESSAGES.IntakeEvent, { ...data }));
   }
 
   async run() {

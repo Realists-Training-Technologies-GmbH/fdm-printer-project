@@ -12,6 +12,24 @@ export function downloadFileByBlob(data: ArrayBuffer, fileName: string, mimeType
   URL.revokeObjectURL(link.href)
 }
 
+/**
+ * Hand a URL to the browser to download natively (parallel, with the browser's
+ * own progress, surviving SPA navigation). The server sets Content-Disposition
+ * so the filename comes from the response, not the link. Use for ticketed /
+ * already-authorized URLs.
+ */
+export function triggerBrowserDownload(url: string) {
+  const link = document.createElement('a')
+  link.href = url
+  link.rel = 'noopener'
+  // Hint the browser to download rather than navigate; the server's
+  // Content-Disposition is authoritative for the actual filename.
+  link.setAttribute('download', '')
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
+
 export async function downloadFileByUrl(url: string, fileName: string) {
   const apiBase = await getBaseUri()
   const isAbsolute =

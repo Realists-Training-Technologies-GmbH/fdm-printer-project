@@ -115,91 +115,78 @@ import type { ThumbnailInfo } from '@/backend/file-storage.service'
 import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { formatFileSize } from "@/utils/file-size.util"
-import { useFileStorageThumbnailQuery, fileStorageThumbnailQueryKey } from '@/queries/file-storage-thumbnail.query'
-import { useQueryClient } from '@tanstack/vue-query'
 import { FileStorageService } from '@/backend/file-storage.service'
+import { IntakeService } from '@/backend/intake.service'
 
 const thumbnailViewerDialog = useDialog(DialogName.JobThumbnailViewer)
-const queryClient = useQueryClient()
 
 const isOpen = computed(() => thumbnailViewerDialog.isDialogOpened())
 const context = computed(() => thumbnailViewerDialog.context())
 
 const thumbnails = ref<ThumbnailInfo[]>([])
 const currentIndex = ref(0)
-const fileStorageId = ref<string | null>(null)
-const carouselThumbnailUrls = ref<Map<number, string>>(new Map())
+// Source of the bytes: file storage (by id) or an intake item (by id). The
+// viewer is shared between Files and Intake; only the fetcher differs.
+const source = ref<'fileStorage' | 'intake'>('fileStorage')
+const sourceId = ref<string | number | null>(null)
+const loading = ref(false)
+// index -> data URL. Holds both the main image and carousel thumbs.
+const thumbnailUrls = ref<Map<number, string>>(new Map())
 
-const currentThumbnailIndex = computed(() => {
-  const thumb = thumbnails.value[currentIndex.value]
-  return thumb?.index
+function fetchThumbnail(index: number): Promise<string> {
+  if (source.value === 'intake' && typeof sourceId.value === 'number') {
+    return IntakeService.getThumbnailBase64(sourceId.value, index)
+  }
+  return FileStorageService.getThumbnailBase64(String(sourceId.value), index)
+}
+
+const currentThumbnail = computed(() => thumbnails.value[currentIndex.value] || null)
+const currentThumbnailUrl = computed(() => {
+  const idx = currentThumbnail.value?.index
+  return idx != null ? thumbnailUrls.value.get(idx) ?? '' : ''
 })
 
-const fileStorageIdComputed = computed(() => fileStorageId.value)
-const thumbnailsComputed = computed(() => thumbnails.value)
-const currentThumbnailIndexComputed = computed(() => currentThumbnailIndex.value)
-
-const { data: currentThumbnailUrl, isLoading: loading } = useFileStorageThumbnailQuery(
-  fileStorageIdComputed,
-  thumbnailsComputed,
-  currentThumbnailIndexComputed,
-  isOpen.value
-)
+const getThumbnailUrl = (index: number): string => thumbnailUrls.value.get(index) || ''
 
 watch(isOpen, (value) => {
-  if (value && context.value?.fileStorageId) {
-    fileStorageId.value = context.value.fileStorageId
-    const thumbsList = context.value.thumbnails || []
+  if (value && context.value) {
+    source.value = context.value.source ?? 'fileStorage'
+    sourceId.value =
+      source.value === 'intake' ? context.value.intakeItemId ?? null : context.value.fileStorageId ?? null
 
-    thumbnails.value = [...thumbsList].sort((a, b) => {
-      const aPixels = a.width * a.height
-      const bPixels = b.width * b.height
-      return bPixels - aPixels
-    })
+    // Highest-resolution first so the main image opens at best quality.
+    const thumbsList = context.value.thumbnails || []
+    thumbnails.value = [...thumbsList].sort((a, b) => b.width * b.height - a.width * a.height)
     currentIndex.value = 0
   } else if (!value) {
     thumbnails.value = []
     currentIndex.value = 0
-    fileStorageId.value = null
+    sourceId.value = null
+    thumbnailUrls.value.clear()
   }
 })
 
-const currentThumbnail = computed(() => {
-  return thumbnails.value[currentIndex.value] || null
-})
-
-
-watch([thumbnails, fileStorageId, isOpen], async () => {
-  if (!fileStorageId.value || thumbnails.value.length === 0 || !isOpen.value) {
-    carouselThumbnailUrls.value.clear()
+// Load all thumbnail bytes (main + carousel) once the dialog opens.
+watch([thumbnails, sourceId, isOpen], async () => {
+  if (sourceId.value == null || thumbnails.value.length === 0 || !isOpen.value) {
+    thumbnailUrls.value.clear()
     return
   }
-
-  const loadThumbnail = async (thumb: ThumbnailInfo) => {
-    const queryKey = [fileStorageThumbnailQueryKey, fileStorageId.value, thumb.index]
-
-    try {
-      const url = await queryClient.fetchQuery({
-        queryKey,
-        queryFn: () => FileStorageService.getThumbnailBase64(fileStorageId.value!, thumb.index),
-        staleTime: 1000 * 60 * 60,
-      })
-
-      if (url) {
-        carouselThumbnailUrls.value.set(thumb.index, url)
+  loading.value = true
+  const next = new Map<number, string>()
+  await Promise.all(
+    thumbnails.value.map(async (thumb) => {
+      try {
+        const url = await fetchThumbnail(thumb.index)
+        if (url) next.set(thumb.index, url)
+      } catch (err) {
+        console.debug(`Failed to load thumbnail ${thumb.index}:`, err)
       }
-    } catch (err) {
-      console.debug(`Failed to load carousel thumbnail ${thumb.index}:`, err)
-    }
-  }
-
-  carouselThumbnailUrls.value.clear()
-  await Promise.all(thumbnails.value.map(thumb => loadThumbnail(thumb)))
+    }),
+  )
+  thumbnailUrls.value = next
+  loading.value = false
 }, { immediate: true })
-
-const getThumbnailUrl = (index: number): string => {
-  return carouselThumbnailUrls.value.get(index) || ''
-}
 
 const nextThumbnail = () => {
   if (currentIndex.value >= thumbnails.value.length - 1) {

@@ -97,6 +97,38 @@ export class FileStorageService implements IFileStorageService {
   }
 
   /**
+   * Stream a stored file to an HTTP response as an attachment download.
+   * Shared by the authenticated download route and the ticket-based public
+   * redeem route. Returns false (and sends 404) when the file is missing.
+   */
+  async streamDownload(res: import("express").Response, fileStorageId: string): Promise<boolean> {
+    const file = await this.getFileInfo(fileStorageId);
+    if (!file) {
+      res.status(404).send({ error: "File not found" });
+      return false;
+    }
+
+    const downloadName = file.fileName.replace(/"/g, "");
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${downloadName}"; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
+    );
+    res.setHeader("Content-Length", this.getFileSize(fileStorageId).toString());
+
+    const stream = this.readFileStream(fileStorageId);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).send({ error: "Failed to read file" });
+      } else {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
+    return true;
+  }
+
+  /**
    * Reject a filename that already exists. When `folderPath` is supplied the
    * check is scoped to that folder (so the same name may live in different
    * folders — required for bulk/folder uploads); omitting it keeps the legacy

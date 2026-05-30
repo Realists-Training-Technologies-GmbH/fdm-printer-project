@@ -34,12 +34,24 @@
           <v-list-item
             v-bind="props"
             :to="path"
-            :prepend-icon="icon"
             density="comfortable"
             color="primary"
             class="nav-item"
             router-link
-          />
+          >
+            <template #prepend>
+              <v-badge
+                v-if="path === '/intake' && intakePending > 0"
+                :content="intakePending"
+                color="primary"
+                offset-x="-2"
+                offset-y="-2"
+              >
+                <v-icon>{{ icon }}</v-icon>
+              </v-badge>
+              <v-icon v-else>{{ icon }}</v-icon>
+            </template>
+          </v-list-item>
         </template>
       </v-tooltip>
     </v-list>
@@ -76,6 +88,11 @@
 
 <script lang="ts" setup>
 import imgLogo from '@/assets/logo.svg'
+import { onMounted } from 'vue'
+import { useIntakePendingCount, ensureIntakeCountStarted } from '@/shared/intake-count.composable'
+
+const intakePending = useIntakePendingCount()
+onMounted(() => ensureIntakeCountStarted())
 
 const primaryItems: Array<[string, string, string]> = [
   ['dashboard', 'Dashboard', '/dashboard'],
@@ -84,6 +101,7 @@ const primaryItems: Array<[string, string, string]> = [
   ['mdi:mdi-camera', 'Cameras', '/cameras'],
   ['mdi:mdi-history', 'Print Jobs', '/jobs'],
   ['mdi:mdi-folder', 'Files', '/files'],
+  ['mdi:mdi-tray-arrow-down', 'Intake', '/intake'],
   ['build', 'Maintenance', '/maintenance'],
 ]
 

@@ -34,6 +34,19 @@ export class ServerApi {
   static readonly apiKeysRoute = `${ServerApi.base}/api-keys`
   static readonly apiKeyRoute = (id: number) => `${ServerApi.apiKeysRoute}/${id}`
 
+  static readonly fileStorageRoute = `${ServerApi.base}/file-storage`
+  static readonly fileDownloadTicketRoute = (id: string) =>
+    `${ServerApi.fileStorageRoute}/${id}/download-ticket`
+  static readonly downloadRedeemRoute = `${ServerApi.base}/download/redeem`
+  static readonly folderExportTicketRoute = `${ServerApi.fileStorageRoute}/folders/export-ticket`
+
+  static readonly intakeRoute = `${ServerApi.base}/intake`
+  static readonly intakeArchiveRoute = (id: number) => `${ServerApi.intakeRoute}/${id}/archive`
+  static readonly intakeDispatchRoute = (id: number) => `${ServerApi.intakeRoute}/${id}/dispatch`
+  static readonly intakeItemRoute = (id: number) => `${ServerApi.intakeRoute}/${id}`
+  static readonly intakeThumbnailRoute = (id: number, index: number) =>
+    `${ServerApi.intakeRoute}/${id}/thumbnail/${index}`
+
   static readonly deleteTagRoute = (id: number) => `${ServerApi.base}/printer-tag/${id}`
 
   static readonly updateTagNameRoute = (id: number) =>

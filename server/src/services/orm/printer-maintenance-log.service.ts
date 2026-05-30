@@ -112,6 +112,45 @@ export class PrinterMaintenanceLogService {
     return log;
   }
 
+  /**
+   * Re-derive `printer.disabledReason` from the active (uncompleted) maintenance
+   * logs, which are the durable source of truth. The disabledReason column is
+   * only kept "for backwards compatibility" and historically failed to persist
+   * (PrinterService.update dropped it), so a printer could carry an active
+   * maintenance log yet show a blank disabledReason after a restart — making the
+   * grid lose its maintenance badge. Run this on boot to heal that drift.
+   *
+   * Only fills in printers whose disabledReason is currently empty so a manual
+   * override is never clobbered. Returns the number of printers reconciled.
+   */
+  async reconcileActiveDisabledReasons(): Promise<number> {
+    const activeLogs = await this.repository.find({ where: { completed: false } });
+
+    let reconciled = 0;
+    for (const log of activeLogs) {
+      if (!log.printerId) {
+        continue;
+      }
+
+      let printer;
+      try {
+        printer = await this.printerService.get(log.printerId);
+      } catch {
+        // Printer was deleted while a log lingered — nothing to reconcile.
+        continue;
+      }
+
+      if (printer.disabledReason?.length) {
+        continue;
+      }
+
+      await this.printerService.updateDisabledReason(log.printerId, this.buildDisabledReasonFromMetadata(log.metadata));
+      reconciled++;
+    }
+
+    return reconciled;
+  }
+
   async get(logId: number): Promise<PrinterMaintenanceLog> {
     const log = await this.repository.findOne({ where: { id: logId } });
 

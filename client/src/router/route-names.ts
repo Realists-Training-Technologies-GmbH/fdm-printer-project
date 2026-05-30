@@ -8,6 +8,7 @@ export const RouteNames = {
   CameraGridView: 'CameraGridView',
   PrintJobs: 'Print Jobs',
   Files: 'Files',
+  Intake: 'Intake',
   Maintenance: 'Maintenance',
   PrinterDetail: 'PrinterDetail',
   About: 'About',

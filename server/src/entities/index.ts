@@ -12,3 +12,4 @@ export { Tag } from "./tag.entity";
 export { PrintJob } from "./print-job.entity";
 export { PrinterMaintenanceLog } from "./printer-maintenance-log.entity";
 export { FileStorageFolder } from "./file-storage-folder.entity";
+export { IntakeItem } from "./intake-item.entity";

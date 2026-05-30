@@ -13,6 +13,8 @@ import { useEventBus } from "@vueuse/core";
 import { useDebugSocketStore } from "@/store/debug-socket.store";
 import { useOverlayStore } from "@/store/overlay.store";
 import { notifyPrinterThumbnailChanged } from "@/shared/printer-thumbnail-invalidator.composable";
+import { notifyIntakeChanged } from "@/shared/intake-invalidator.composable";
+import { refreshIntakePendingCount } from "@/shared/intake-count.composable";
 import { useBrowserNotifications } from "@/shared/notifications.composable";
 
 enum IO_MESSAGES {
@@ -23,6 +25,7 @@ enum IO_MESSAGES {
   PrinterThumbnailChanged = "printer.thumbnailChanged",
   QueueEvent = "printQueue.event",
   PrintJobEvent = "printJob.event",
+  IntakeEvent = "intake.event",
 }
 
 interface QueueEventPayload {
@@ -48,6 +51,12 @@ interface PrintJobEventPayload {
   fileName: string;
   reason?: string;
   actualTimeSeconds?: number;
+}
+
+interface IntakeEventPayload {
+  kind: "created" | "resolved";
+  id: number;
+  status?: string;
 }
 
 let appSocketIO: Socket | null = null;
@@ -354,6 +363,20 @@ export class SocketIoService {
           title: `${printerName}: print cancelled`,
           subtitle: data.fileName,
           warning: true,
+        });
+      }
+    });
+
+    // Intake inbox changed. Broadcast on the event bus so the IntakeView and
+    // the nav badge refresh; toast only newly-arrived uploads so the operator
+    // notices a file landed even from another page.
+    appSocketIO.on(IO_MESSAGES.IntakeEvent, (data: IntakeEventPayload) => {
+      notifyIntakeChanged(data);
+      void refreshIntakePendingCount();
+      if (data?.kind === "created") {
+        this.snackbar.openInfoMessage({
+          title: "New file in Intake",
+          subtitle: "A slicer upload is waiting to be assigned.",
         });
       }
     });

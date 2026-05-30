@@ -1,12 +1,13 @@
 import { GET, POST, route, before } from "awilix-express";
 import type { Request, Response } from "express";
 import { FileStorageService } from "@/services/file-storage.service";
-import { FileAnalysisService } from "@/services/file-analysis.service";
 import { MulterService } from "@/services/core/multer.service";
+import { IntakeService } from "@/services/orm/intake.service";
 import type { ILoggerFactory } from "@/handlers/logger-factory";
 import { LoggerService } from "@/handlers/logger";
 import { AppConstants } from "@/server.constants";
 import { slicerApiKeyAuth } from "@/middleware/slicer-api-key.middleware";
+import { extname } from "node:path";
 
 /**
  * OctoPrint-compatible API for PrusaSlicer and other slicer integration
@@ -22,8 +23,8 @@ export class SlicerCompatController {
   constructor(
     loggerFactory: ILoggerFactory,
     private readonly fileStorageService: FileStorageService,
-    private readonly fileAnalysisService: FileAnalysisService,
     private readonly multerService: MulterService,
+    private readonly intakeService: IntakeService,
   ) {
     this.logger = loggerFactory(SlicerCompatController.name);
   }
@@ -73,67 +74,57 @@ export class SlicerCompatController {
 
       const file = files[0];
 
-      await this.fileStorageService.validateUniqueFilename(file.originalname);
-
+      // Files from a slicer don't go straight into File Storage anymore — they
+      // land in the Intake inbox, where an operator decides the folder and the
+      // target printer. We hand the temp bytes to IntakeService, which moves
+      // them into the staging dir under the original name (with extension) and
+      // analyzes them there — the analyzer dispatches on extension, and multer's
+      // temp file has none, so analyzing the temp path directly would fail.
       const fileHash = await this.fileStorageService.calculateFileHash(file.path);
-      const fileStorageId = await this.fileStorageService.saveFile(file, fileHash);
-      const filePath = this.fileStorageService.getFilePath(fileStorageId);
+      const fileFormat = extname(file.originalname).slice(1).toLowerCase() || null;
 
-      let metadata: any = {};
-      let thumbnails: any[] = [];
+      const item = await this.intakeService.createFromUpload({
+        originalFileName: file.originalname,
+        fileFormat,
+        fileSize: file.size,
+        fileHash,
+        tempPath: file.path,
+        source: "prusaslicer",
+      });
+      const thumbnailCount = item.metadata
+        ? Array.isArray((item.metadata as any)._thumbnails)
+          ? (item.metadata as any)._thumbnails.length
+          : 0
+        : 0;
+      const metadata = (item.metadata as any) ?? {};
 
-      try {
-        const analysisResult = await this.fileAnalysisService.analyzeFile(filePath);
-        metadata = analysisResult.metadata;
-        thumbnails = analysisResult.thumbnails || [];
-
-        const thumbnailMetadata =
-          thumbnails.length > 0 ? await this.fileStorageService.saveThumbnails(fileStorageId, thumbnails) : [];
-
-        await this.fileStorageService.saveMetadata(
-          fileStorageId,
-          metadata,
-          fileHash,
-          file.originalname,
-          thumbnailMetadata,
-        );
-      } catch (analysisError) {
-        this.logger.error(`Failed to analyze uploaded file: ${analysisError}`);
-      }
-
-      try {
-        this.multerService.clearUploadedFile(file);
-      } catch (e) {
-        this.logger.error(`Could not remove uploaded file from temporary storage`);
-      }
-
-      // Return OctoPrint-compatible response
+      // Return OctoPrint-compatible response so the slicer reports success.
       res.status(201).send({
         files: {
           local: {
             name: file.originalname,
             origin: "local",
             refs: {
-              resource: `/api/files/local/${fileStorageId}`,
-              download: `/api/files/local/${fileStorageId}`,
+              resource: `/api/files/local/intake-${item.id}`,
+              download: `/api/files/local/intake-${item.id}`,
             },
           },
         },
         done: true,
-        // Additional PrusaHero metadata
         _prusaHero: {
-          fileStorageId,
+          intakeItemId: item.id,
           fileHash,
           analyzed: Object.keys(metadata).length > 0,
-          thumbnailCount: thumbnails.length,
+          thumbnailCount,
           printTime: metadata.gcodePrintTimeSeconds,
           filament: metadata.filamentUsedGrams,
         },
       });
 
-      this.logger.log(`File uploaded to printer: ${file.originalname} -> ${fileStorageId}`);
+      this.logger.log(`Slicer upload received into intake: ${file.originalname} -> intake item ${item.id}`);
     } catch (error) {
-      // Clean up temp file if it exists
+      // Clean up temp file if it exists (createFromUpload only moves it on
+      // success, so a failure leaves the temp file for us to remove).
       if (files?.[0]?.path) {
         try {
           this.multerService.clearUploadedFile(files[0]);

@@ -91,6 +91,16 @@ export class PrinterService extends BaseService(Printer, PrinterDto, CreatePrint
       printerType,
       password: password ?? undefined,
       username: username ?? undefined,
+      // `createPrinterSchema` is `.strip()`ed, so validateInput() above drops
+      // every column it doesn't declare (disabledReason, assignee, feedRate,
+      // flowRate). Those still need to persist when patched — otherwise the
+      // change only survives in-memory via the printerUpdated event below and
+      // is silently lost on the next server restart (e.g. maintenance badge
+      // disappearing after a reboot). Forward them explicitly when present.
+      ...(partial.disabledReason !== undefined ? { disabledReason: partial.disabledReason } : {}),
+      ...(partial.assignee !== undefined ? { assignee: partial.assignee } : {}),
+      ...(partial.feedRate !== undefined ? { feedRate: partial.feedRate } : {}),
+      ...(partial.flowRate !== undefined ? { flowRate: partial.flowRate } : {}),
     });
     this.eventEmitter2.emit(printerEvents.printerUpdated, { printer } satisfies PrinterUpdatedEvent);
     return updatedPrinter;

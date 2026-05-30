@@ -94,6 +94,9 @@ export class PrintQueueController {
     const fileStorageId = typeof req.query.fileStorageId === "string" ? req.query.fileStorageId : undefined;
     const fileFormatQuery = typeof req.query.fileFormat === "string" ? req.query.fileFormat : undefined;
     const jobIdQuery = typeof req.query.jobId === "string" ? req.query.jobId : undefined;
+    // Optional model hint for the format-only path (e.g. Intake, where the file
+    // isn't in File Storage yet). Lets the cross-family guard run for .gcode too.
+    const printerModelQuery = typeof req.query.printerModel === "string" ? req.query.printerModel : undefined;
 
     let fileFormat: FileFormatType | undefined;
     let resolvedFileName: string | undefined;
@@ -120,6 +123,7 @@ export class PrintQueueController {
         slicerTargetModel = job.printerModel ?? (job.metadata as any)?.printerModel ?? null;
       } else if (fileFormatQuery) {
         fileFormat = fileFormatQuery as FileFormatType;
+        slicerTargetModel = printerModelQuery ?? null;
       } else {
         throw new BadRequestException("One of fileStorageId, jobId, or fileFormat is required");
       }

@@ -9,10 +9,10 @@ import { MulterService } from "@/services/core/multer.service";
 import type { ILoggerFactory } from "@/handlers/logger-factory";
 import { LoggerService } from "@/handlers/logger";
 import { FileAnalysisService } from "@/services/file-analysis.service";
+import { DownloadTicketService } from "@/services/download-ticket.service";
 import { BadRequestException, ConflictException } from "@/exceptions/runtime.exceptions";
 import { copyFileSync, existsSync, unlinkSync } from "node:fs";
 import { extname } from "node:path";
-import AdmZip from "adm-zip";
 
 @route(AppConstants.apiRoute + "/file-storage")
 @before([authenticate(), authorizeRoles([ROLES.ADMIN, ROLES.OPERATOR])])
@@ -25,6 +25,7 @@ export class FileStorageController {
     private readonly fileStorageFolderService: FileStorageFolderService,
     private readonly multerService: MulterService,
     private readonly fileAnalysisService: FileAnalysisService,
+    private readonly downloadTicketService: DownloadTicketService,
   ) {
     this.logger = loggerFactory(FileStorageController.name);
   }
@@ -97,41 +98,10 @@ export class FileStorageController {
     res.send({ folders });
   }
 
-  @GET()
-  @route("/folders/export")
-  async exportFolder(req: Request, res: Response) {
-    const folderPath = FileStorageFolderService.normalisePath((req.query.path as string) ?? null);
-    if (!folderPath) {
-      throw new BadRequestException("`path` query param is required and cannot be root");
-    }
-
-    // Everything in the subtree (the folder itself or any descendant).
-    const all = await this.fileStorageService.listAllFiles();
-    const inside = all.filter((f) => {
-      const fp: string | null = f.metadata?._folderPath ?? null;
-      if (!fp) return false;
-      return fp === folderPath || fp.startsWith(folderPath + "/");
-    });
-
-    // Rebuild the folder hierarchy inside the archive using each file's original
-    // name, placed under its path relative to the exported folder.
-    const zip = new AdmZip();
-    for (const f of inside) {
-      const buffer = await this.fileStorageService.getFile(f.fileStorageId);
-      const fp = f.metadata?._folderPath ?? folderPath;
-      const relDir = fp === folderPath ? "" : fp.substring(folderPath.length + 1);
-      const name = f.metadata?._originalFileName || f.fileName;
-      const entryPath = relDir ? `${relDir}/${name}` : name;
-      zip.addFile(entryPath, buffer);
-    }
-
-    const folderName = FileStorageFolderService.nameOf(folderPath) || "folder";
-    const archive = zip.toBuffer();
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${folderName}.zip"`);
-    res.setHeader("Content-Length", archive.length.toString());
-    res.send(archive);
-  }
+  // Folder ZIP export moved to a one-time-ticket flow: see
+  // mintFolderExportTicket below + DownloadController's public redeem, so the
+  // browser downloads the archive natively instead of blocking on an
+  // in-memory buffer. The old authenticated GET /folders/export was removed.
 
   @POST()
   @route("/folders")
@@ -344,6 +314,55 @@ export class FileStorageController {
       this.logger.error(`Failed to get file metadata for ${fileStorageId}: ${error}`);
       res.status(500).send({ error: "Failed to get file metadata" });
     }
+  }
+
+  /**
+   * Stream a stored file's raw bytes back as a download, named after the
+   * original upload (which already carries the right extension).
+   * GET /api/file-storage/:fileStorageId/download
+   */
+  @GET()
+  @route("/:fileStorageId/download")
+  async downloadFile(req: Request, res: Response) {
+    const { fileStorageId } = req.params as { fileStorageId: string };
+    await this.fileStorageService.streamDownload(res, fileStorageId);
+  }
+
+  /**
+   * Mint a short-lived, single-use download ticket so the browser can fetch
+   * the file natively (parallel, survives navigation) without the JWT in the
+   * URL. The client opens `…/download/redeem?ticket=…` as a normal link.
+   * POST /api/file-storage/:fileStorageId/download-ticket
+   */
+  @POST()
+  @route("/:fileStorageId/download-ticket")
+  async mintDownloadTicket(req: Request, res: Response) {
+    const { fileStorageId } = req.params as { fileStorageId: string };
+
+    const file = await this.fileStorageService.getFileInfo(fileStorageId);
+    if (!file) {
+      res.status(404).send({ error: "File not found" });
+      return;
+    }
+
+    const ticket = this.downloadTicketService.mint({ kind: "file", fileStorageId }, req.user?.id ?? null);
+    res.send({ ticket });
+  }
+
+  /**
+   * Mint a single-use ticket for a folder ZIP export so the browser can
+   * download it natively (the ZIP is built on redeem, not here).
+   * POST /api/file-storage/folders/export-ticket?path=…
+   */
+  @POST()
+  @route("/folders/export-ticket")
+  async mintFolderExportTicket(req: Request, res: Response) {
+    const folderPath = FileStorageFolderService.normalisePath((req.query.path as string) ?? null);
+    if (!folderPath) {
+      throw new BadRequestException("`path` query param is required and cannot be root");
+    }
+    const ticket = this.downloadTicketService.mint({ kind: "folderZip", folderPath }, req.user?.id ?? null);
+    res.send({ ticket });
   }
 
   /**

@@ -22,6 +22,7 @@ import SoftwareUpgradeSettings from '../components/Settings/SoftwareUpgradeSetti
 import DiagnosticsSettings from '../components/Settings/DiagnosticsSettings.vue'
 import PrintJobsView from '../components/PrintJobs/PrintJobsView.vue'
 import FilesView from '../components/Files/FilesView.vue'
+import IntakeView from '../components/Intake/IntakeView.vue'
 import MaintenanceView from '../components/Maintenance/MaintenanceView.vue'
 import PrinterDetailView from '../components/PrinterDetail/PrinterDetailView.vue'
 import SlicerSettings from '@/components/Settings/SlicerSettings.vue'
@@ -176,6 +177,12 @@ const router = createRouter({
       name: RouteNames.Files,
       meta: NeedsAuth,
       component: FilesView
+    },
+    {
+      path: '/intake',
+      name: RouteNames.Intake,
+      meta: NeedsAuth,
+      component: IntakeView
     },
     {
       path: '/maintenance',

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useOverlayStore } from "@/store/overlay.store";
-import GithubIssuesButton from '@/components/Generic/Actions/GithubIssuesButton.vue'
 
 const appLoaderStore = useOverlayStore();
 const countdown = ref(0)
@@ -91,30 +90,6 @@ onUnmounted(() => {
           <v-icon class="mr-2">mdi:mdi-play</v-icon>
           Retry Now
         </v-btn>
-      </div>
-
-      <v-divider class="my-8"/>
-
-      <div class="text-center">
-        <p class="text-caption text-medium-emphasis mb-3">
-          Helpful links:
-        </p>
-        <div class="d-flex ga-3 flex-wrap justify-center mb-6">
-          <GithubIssuesButton
-            label="GitHub"
-            variant="outlined"
-            color="surface-variant"
-          />
-        </div>
-
-        <p class="text-caption text-medium-emphasis mb-3">
-          Common solutions:
-        </p>
-        <div class="d-flex flex-wrap justify-center ga-2">
-          <v-chip size="small" variant="outlined">Check server status</v-chip>
-          <v-chip size="small" variant="outlined">Verify network connection</v-chip>
-          <v-chip size="small" variant="outlined">Review server logs</v-chip>
-        </div>
       </div>
     </v-card>
   </v-slide-y-transition>

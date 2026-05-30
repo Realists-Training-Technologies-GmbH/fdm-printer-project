@@ -154,11 +154,16 @@ export class PrintQueueService extends BaseService {
     fileStorageId?: string
     jobId?: number
     fileFormat?: 'gcode' | 'bgcode' | '3mf'
+    // Model the file was sliced for (e.g. "MK3S", "XL"). Only used with the
+    // fileFormat path; gates the cross-family check when the file isn't in
+    // File Storage yet (Intake).
+    printerModel?: string
   }): Promise<CompatiblePrintersResponse> {
     const qs = new URLSearchParams()
     if (params.fileStorageId) qs.set('fileStorageId', params.fileStorageId)
     if (params.jobId != null) qs.set('jobId', String(params.jobId))
     if (params.fileFormat) qs.set('fileFormat', params.fileFormat)
+    if (params.printerModel) qs.set('printerModel', params.printerModel)
     return this.get<CompatiblePrintersResponse>(
       `${ServerApi.printQueueRoute}/compatible-printers?${qs.toString()}`
     )

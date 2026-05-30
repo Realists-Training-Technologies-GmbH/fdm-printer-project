@@ -41,7 +41,12 @@ export interface PrintJobDetailsDialogContext {
 }
 
 export interface JobThumbnailViewerContext {
-  fileStorageId: string
+  /** Where to fetch the thumbnail bytes from. Defaults to file storage. */
+  source?: 'fileStorage' | 'intake'
+  /** File Storage id (when source is fileStorage / omitted). */
+  fileStorageId?: string
+  /** Intake item id (when source is 'intake'). */
+  intakeItemId?: number
   thumbnails: { index: number; width: number; height: number; format: string; size: number }[]
 }
 

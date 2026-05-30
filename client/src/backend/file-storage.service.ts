@@ -1,5 +1,7 @@
 import { BaseService } from '@/backend/base.service'
-import { downloadFileByBlob } from '@/utils/download-file.util'
+import { triggerBrowserDownload } from '@/utils/download-file.util'
+import { ServerApi } from '@/backend/server.api'
+import { getBaseUri } from '@/shared/http-client'
 
 export interface ThumbnailInfo {
   index: number
@@ -136,13 +138,32 @@ export class FileStorageService extends BaseService {
     return this.patch(`/api/v2/file-storage/${fileStorageId}/rename`, { name })
   }
 
-  /** Download a folder (and its subtree) as a .zip, named after the folder. */
+  /**
+   * Download a folder (and its subtree) as a .zip via a one-time ticket, so
+   * the browser builds/streams it natively (parallel, survives navigation)
+   * instead of blocking while we buffer the whole archive in memory.
+   */
   static async exportFolderZip(path: string): Promise<void> {
-    const response = await this.getDownload<ArrayBuffer>(
-      `/api/v2/file-storage/folders/export?path=${encodeURIComponent(path)}`
+    const { ticket } = await this.post<{ ticket: string }>(
+      `${ServerApi.folderExportTicketRoute}?path=${encodeURIComponent(path)}`
     )
-    const name = path.split('/').filter(Boolean).pop() || 'folder'
-    downloadFileByBlob(response.data, `${name}.zip`, 'application/zip')
+    const base = (await getBaseUri()).replace(/\/$/, '')
+    triggerBrowserDownload(`${base}${ServerApi.downloadRedeemRoute}?ticket=${encodeURIComponent(ticket)}`)
+  }
+
+  /**
+   * Download via a one-time ticket so the browser fetches the file natively:
+   * the request runs in parallel, shows the browser's own progress, and isn't
+   * cancelled when the user navigates away from the page. We mint the ticket
+   * with the authenticated client, then hand a plain URL to the browser — no
+   * JWT in the URL (the ticket is single-use and short-lived).
+   */
+  static async downloadFile(fileStorageId: string, _fileName: string): Promise<void> {
+    const { ticket } = await this.post<{ ticket: string }>(
+      ServerApi.fileDownloadTicketRoute(fileStorageId)
+    )
+    const base = (await getBaseUri()).replace(/\/$/, '')
+    triggerBrowserDownload(`${base}${ServerApi.downloadRedeemRoute}?ticket=${encodeURIComponent(ticket)}`)
   }
 
   static async getThumbnailBase64(fileStorageId: string, index: number = 0): Promise<string> {

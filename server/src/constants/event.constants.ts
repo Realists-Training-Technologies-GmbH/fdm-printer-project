@@ -16,6 +16,12 @@ export const printerEvents = {
   batchPrinterCreated: "batchPrinterCreated",
 };
 
+export const intakeEvents = {
+  // A pending item arrived, or one was archived/dispatched/discarded. The
+  // SocketIoTask bridges this to the client as IO_MESSAGES.IntakeEvent.
+  changed: "intake.changed",
+};
+
 export interface PrinterCreatedEvent {
   printer: Printer;
 }

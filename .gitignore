@@ -31,3 +31,7 @@ client/.env
 !.vscode/settings.json
 .DS_Store
 *.log
+
+# Claude Code — personal local settings (permission allowlist etc.) stay out
+# of the repo; launch.json (preview server config) is shared and tracked.
+.claude/settings.local.json

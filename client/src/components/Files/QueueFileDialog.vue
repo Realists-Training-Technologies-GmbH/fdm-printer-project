@@ -56,6 +56,30 @@
               <v-list-item-subtitle>
                 {{ getPrinterTypeName(printer.printerType) }}
               </v-list-item-subtitle>
+
+              <template #append>
+                <div class="d-flex align-center ga-2">
+                  <v-chip
+                    v-if="queueCountFor(printer.id) > 0"
+                    size="x-small"
+                    variant="tonal"
+                    color="info"
+                    prepend-icon="queue"
+                  >
+                    {{ queueCountFor(printer.id) }} queued
+                  </v-chip>
+                  <v-chip
+                    size="x-small"
+                    variant="tonal"
+                    :color="printerLiveStatus(printer.id).color"
+                  >
+                    {{ printerLiveStatus(printer.id).label }}
+                    <template v-if="printerLiveStatus(printer.id).timeLeftSeconds">
+                      · {{ formatDuration(printerLiveStatus(printer.id).timeLeftSeconds) }} left
+                    </template>
+                  </v-chip>
+                </div>
+              </template>
             </v-list-item>
           </v-list>
 
@@ -116,8 +140,10 @@ import { ref, watch } from 'vue'
 import type { FileMetadata } from '@/backend/file-storage.service'
 import { PrintQueueService } from '@/backend/print-queue.service'
 import { usePrinterStore } from '@/store/printer.store'
+import { usePrinterStateStore } from '@/store/printer-state.store'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { displayFileName } from '@/utils/file-name.util'
+import { formatDuration } from '@/utils/date-time.utils'
 import { notifyPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
 import { getPrinterTypeName } from '@/shared/printer-types.constants'
 import { useInvalidateGlobalQueue } from '@/queries/global-queue.query'
@@ -137,6 +163,7 @@ const emit = defineEmits<Emits>()
 
 const snackbar = useSnackbar()
 const printerStore = usePrinterStore()
+const printerStateStore = usePrinterStateStore()
 const invalidateGlobalQueue = useInvalidateGlobalQueue()
 
 const selectedPrinters = ref<number[]>([])
@@ -144,6 +171,40 @@ const queuing = ref(false)
 const compatiblePrinters = ref<Array<Record<string, any>>>([])
 const incompatiblePrinters = ref<Array<Record<string, any> & { incompatibilityReason?: string }>>([])
 const checkingCompat = ref(false)
+
+// Per-printer queue length, fetched once on open. -1 = not loaded yet.
+const queueCountByPrinterId = ref<Record<number, number>>({})
+
+// Live status of a printer for the row: whether it's printing/paused/online and
+// how much time is left on the current job. Reactive via the printer-state store.
+interface PrinterLiveStatus {
+  state: 'printing' | 'paused' | 'idle' | 'offline'
+  label: string
+  color: string
+  timeLeftSeconds: number | null
+}
+function printerLiveStatus(printerId: number): PrinterLiveStatus {
+  if (!printerStateStore.isApiResponding(printerId)) {
+    return { state: 'offline', label: 'Offline', color: 'grey', timeLeftSeconds: null }
+  }
+  if (printerStateStore.isPrinterPrinting(printerId)) {
+    const raw =
+      printerStateStore.printerEventsById[printerId]?.current?.payload?.progress?.printTimeLeft
+    return {
+      state: 'printing',
+      label: 'Printing',
+      color: 'success',
+      timeLeftSeconds: typeof raw === 'number' && raw > 0 ? raw : null,
+    }
+  }
+  if (printerStateStore.isPrinterPaused(printerId)) {
+    return { state: 'paused', label: 'Paused', color: 'warning', timeLeftSeconds: null }
+  }
+  return { state: 'idle', label: 'Idle', color: 'grey', timeLeftSeconds: null }
+}
+function queueCountFor(printerId: number): number {
+  return queueCountByPrinterId.value[printerId] ?? 0
+}
 
 // Reset + check compatibility when dialog opens with a new file
 watch(
@@ -153,6 +214,7 @@ watch(
     selectedPrinters.value = []
     compatiblePrinters.value = []
     incompatiblePrinters.value = []
+    queueCountByPrinterId.value = {}
     if (!props.file) return
 
     checkingCompat.value = true
@@ -164,6 +226,7 @@ watch(
       // keep parity with the previous behaviour.
       compatiblePrinters.value = response.compatible.filter((p) => p.enabled !== false)
       incompatiblePrinters.value = response.incompatible
+      loadQueueCounts()
     } catch (err) {
       console.error('Failed to load compatible printers:', err)
       // Fallback to legacy behaviour (all enabled printers) so the dialog
@@ -175,6 +238,26 @@ watch(
     }
   }
 )
+
+// Fetch queue lengths for the compatible printers in parallel. Best-effort:
+// a failed lookup just leaves that printer's count at 0 rather than blocking
+// the dialog. Runs after the compatibility list is set.
+const loadQueueCounts = async () => {
+  const printers = compatiblePrinters.value
+  await Promise.all(
+    printers.map(async (p) => {
+      try {
+        const res = await PrintQueueService.getPrinterQueue(p.id)
+        queueCountByPrinterId.value = {
+          ...queueCountByPrinterId.value,
+          [p.id]: res.count,
+        }
+      } catch (err) {
+        console.error(`Failed to load queue for printer ${p.id}:`, err)
+      }
+    })
+  )
+}
 
 const togglePrinterSelection = (printerId: number) => {
   const index = selectedPrinters.value.indexOf(printerId)

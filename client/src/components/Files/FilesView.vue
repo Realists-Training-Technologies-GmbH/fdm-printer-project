@@ -114,13 +114,9 @@
       <v-btn
         size="small"
         variant="text"
-        :class="{ 'files-breadcrumb__drop': isFileDragging && dragOverFolderPath === '__root__' }"
         :disabled="currentFolderPath === null"
         prepend-icon="home"
         @click="navigateToFolder(null)"
-        @dragover.prevent="onFolderDragOver('__root__', $event)"
-        @dragleave="onFolderDragLeave('__root__')"
-        @drop.prevent="onFolderDrop(null)"
       >
         Root
       </v-btn>
@@ -205,42 +201,8 @@
     <!-- ─── Files table ─────────────────────────────────────── -->
     <v-card elevation="0" border>
       <v-card-text class="pa-0">
-        <!-- ─── Bulk action bar (shows when there's selection) ── -->
-        <div v-if="selectedCount > 0" class="files-bulk-bar">
-          <v-chip color="primary" variant="flat" size="small" class="font-weight-bold">
-            {{ selectedCount }} selected
-          </v-chip>
-          <v-spacer />
-          <v-btn
-            variant="tonal"
-            size="small"
-            prepend-icon="drive_file_move"
-            @click="openBulkMoveDialog()"
-          >
-            Move
-          </v-btn>
-          <v-btn
-            color="error"
-            variant="tonal"
-            size="small"
-            prepend-icon="delete"
-            :loading="bulkDeleting"
-            @click="bulkDeleteSelected()"
-          >
-            Delete
-          </v-btn>
-          <v-btn
-            variant="text"
-            size="small"
-            prepend-icon="close"
-            @click="clearSelection()"
-          >
-            Clear
-          </v-btn>
-        </div>
-
-        <!-- ─── Select-all header (above folders + files) ──── -->
-        <div v-if="!loading && (folders.length > 0 || paginatedFiles.length > 0)" class="fl-head">
+        <!-- ─── Header: count + sort/filter, or bulk actions when selecting ── -->
+        <div v-if="!loading && (filteredFolders.length > 0 || sortedFiles.length > 0)" class="fl-head">
           <v-checkbox-btn
             :model-value="allSelected"
             :indeterminate="someSelected"
@@ -249,15 +211,83 @@
             class="fl-row__check"
             @update:model-value="toggleSelectAll"
           />
-          <span class="text-caption text-medium-emphasis">
-            <template v-if="folders.length">{{ folders.length }} {{ folders.length === 1 ? 'folder' : 'folders' }} · </template>
+
+          <span v-if="selectedCount === 0" class="text-caption text-medium-emphasis">
+            <template v-if="filteredFolders.length">{{ filteredFolders.length }} {{ filteredFolders.length === 1 ? 'folder' : 'folders' }} · </template>
             {{ filteredFiles.length }} {{ filteredFiles.length === 1 ? 'file' : 'files' }}
           </span>
+          <v-chip v-else color="primary" variant="flat" size="small" class="font-weight-bold">
+            {{ selectedCount }} selected
+          </v-chip>
+
+          <v-spacer />
+
+          <!-- Bulk actions take over the right side while there's a selection -->
+          <template v-if="selectedCount > 0">
+            <v-btn
+              variant="tonal"
+              size="small"
+              prepend-icon="drive_file_move"
+              @click="openBulkMoveDialog()"
+            >
+              Move
+            </v-btn>
+            <v-btn
+              color="error"
+              variant="tonal"
+              size="small"
+              prepend-icon="delete"
+              :loading="bulkDeleting"
+              @click="bulkDeleteSelected()"
+            >
+              Delete
+            </v-btn>
+            <v-btn
+              variant="text"
+              size="small"
+              prepend-icon="close"
+              @click="clearSelection()"
+            >
+              Clear
+            </v-btn>
+          </template>
+
+          <!-- Format filter + sort controls (hidden during selection) -->
+          <template v-else>
+            <v-select
+              v-if="availableFormats.length > 1"
+              v-model="formatFilter"
+              :items="[{ title: 'All types', value: null }, ...availableFormats.map((f) => ({ title: '.' + f, value: f }))]"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="fl-head__control"
+              prepend-inner-icon="filter_list"
+            />
+            <v-select
+              v-model="sortKey"
+              :items="sortOptions"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="fl-head__control"
+              prepend-inner-icon="sort"
+            />
+            <v-btn
+              icon
+              size="small"
+              variant="text"
+              :title="sortDir === 'asc' ? 'Ascending' : 'Descending'"
+              @click="toggleSortDir()"
+            >
+              <v-icon>{{ sortDir === 'asc' ? 'arrow_upward' : 'arrow_downward' }}</v-icon>
+            </v-btn>
+          </template>
         </div>
 
         <!-- ─── Folders, vertical, merged above the file list ──── -->
         <div
-          v-if="currentFolderPath !== null || folders.length > 0"
+          v-if="currentFolderPath !== null || filteredFolders.length > 0"
           class="files-fs-list"
         >
           <!-- Up one level -->
@@ -274,17 +304,13 @@
           </div>
 
           <div
-            v-for="folder in folders"
+            v-for="folder in filteredFolders"
             :key="folder.path"
             class="files-fs-row"
             :class="{
-              'files-fs-row--drop': isFileDragging && dragOverFolderPath === folder.path,
               'files-fs-row--selected': isFolderSelected(folder.path),
             }"
             @click="navigateToFolder(folder.path)"
-            @dragover.prevent="onFolderDragOver(folder.path, $event)"
-            @dragleave="onFolderDragLeave(folder.path)"
-            @drop.prevent="onFolderDrop(folder.path)"
           >
             <v-checkbox-btn
               :model-value="isFolderSelected(folder.path)"
@@ -345,9 +371,37 @@
         </div>
 
         <!-- ─── Empty ──── -->
-        <div v-else-if="filteredFiles.length === 0" class="text-center py-10">
-          <v-icon size="48" color="grey-lighten-1" class="mb-3">folder_off</v-icon>
-          <h3 class="text-subtitle-1">No files found</h3>
+        <div v-else-if="sortedFiles.length === 0" class="text-center py-10">
+          <template v-if="hasActiveFilter">
+            <v-icon size="48" color="grey-lighten-1" class="mb-3">search_off</v-icon>
+            <h3 class="text-subtitle-1">No files match your search</h3>
+            <v-btn
+              class="mt-3"
+              size="small"
+              variant="tonal"
+              prepend-icon="clear"
+              @click="clearFilters()"
+            >
+              Clear filters
+            </v-btn>
+          </template>
+          <template v-else-if="filteredFolders.length === 0">
+            <v-icon size="48" color="grey-lighten-1" class="mb-3">folder_open</v-icon>
+            <h3 class="text-subtitle-1">{{ currentFolderPath ? 'This folder is empty' : 'No files yet' }}</h3>
+            <v-btn
+              class="mt-3"
+              size="small"
+              color="primary"
+              variant="tonal"
+              prepend-icon="upload"
+              @click="fileInput?.click()"
+            >
+              Upload files
+            </v-btn>
+          </template>
+          <template v-else>
+            <p class="text-caption text-medium-emphasis py-2">No files in this folder</p>
+          </template>
         </div>
 
         <!-- ─── File rows ──── -->
@@ -376,14 +430,8 @@
               @click.stop
             />
 
-            <div
-              class="fl-row__main"
-              draggable="true"
-              @dragstart="onFileDragStart(file, $event)"
-              @dragend="onFileDragEnd()"
-            >
+            <div class="fl-row__main">
               <div class="fl-row__name">
-                <v-icon size="x-small" class="fl-row__drag flex-shrink-0">drag_indicator</v-icon>
                 <span class="text-truncate" :title="displayFileName(file)">{{ displayFileName(file) }}</span>
               </div>
               <div class="fl-row__sub">
@@ -430,6 +478,16 @@
               <v-btn icon size="small" variant="text" color="info" :loading="analyzingFiles.has(file.fileStorageId)" @click.stop="analyzeFile(file)">
                 <v-icon>analytics</v-icon>
                 <v-tooltip activator="parent" location="top">Trigger analysis</v-tooltip>
+              </v-btn>
+              <v-btn
+                icon
+                size="small"
+                variant="text"
+                :loading="downloadingFiles.has(file.fileStorageId)"
+                @click.stop="downloadFile(file)"
+              >
+                <v-icon>download</v-icon>
+                <v-tooltip activator="parent" location="top">Download</v-tooltip>
               </v-btn>
               <v-btn icon size="small" variant="text" @click.stop="viewFile(file)">
                 <v-icon>visibility</v-icon>
@@ -718,9 +776,6 @@ const renameDialog = reactive<{
 const selected = ref<string[]>([])
 const bulkDeleting = ref(false)
 
-const draggedFileId = ref<string | null>(null)
-const dragOverFolderPath = ref<string | null>(null)
-const isFileDragging = computed(() => draggedFileId.value !== null)
 const bulkMoveDialog = reactive<{
   open: boolean
   targetPath: string
@@ -760,31 +815,95 @@ const maybeClearUpload = () => {
 
 const totalCount = computed(() => files.value.length)
 
+// ─── Filtering: free-text search + file-format ──────────────────
+const formatFilter = ref<string | null>(null)
+const availableFormats = computed(() => {
+  const set = new Set(files.value.map((f) => f.fileFormat.toLowerCase()))
+  return [...set].sort()
+})
+const hasActiveFilter = computed(() => !!searchQuery.value || !!formatFilter.value)
+function clearFilters() {
+  searchQuery.value = ''
+  formatFilter.value = null
+}
+
 const filteredFiles = computed(() => {
-  if (!searchQuery.value) {
-    return files.value
-  }
-  const query = searchQuery.value.toLowerCase()
-  return files.value.filter(
-    (file) =>
+  // `clearable` resets the field to null, not '', so guard before toLowerCase.
+  const query = (searchQuery.value ?? '').toLowerCase()
+  const format = formatFilter.value
+  return files.value.filter((file) => {
+    if (format && file.fileFormat.toLowerCase() !== format) return false
+    if (!query) return true
+    return (
       displayFileName(file).toLowerCase().includes(query) ||
       file.fileName.toLowerCase().includes(query) ||
       file.fileHash.toLowerCase().includes(query) ||
       file.fileStorageId.toLowerCase().includes(query)
-  )
+    )
+  })
+})
+
+// Search also narrows the folder list shown above the files.
+const filteredFolders = computed(() => {
+  if (!searchQuery.value) return folders.value
+  const query = searchQuery.value.toLowerCase()
+  return folders.value.filter((f) => f.name.toLowerCase().includes(query))
+})
+
+// ─── Sorting ────────────────────────────────────────────────────
+type SortKey = 'name' | 'createdAt' | 'fileSize' | 'printTime' | 'filament'
+const sortOptions: { value: SortKey; title: string }[] = [
+  { value: 'createdAt', title: 'Date added' },
+  { value: 'name', title: 'Name' },
+  { value: 'fileSize', title: 'Size' },
+  { value: 'printTime', title: 'Print time' },
+  { value: 'filament', title: 'Filament' },
+]
+const sortKey = ref<SortKey>('createdAt')
+const sortDir = ref<'asc' | 'desc'>('desc')
+function toggleSortDir() {
+  sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+}
+
+const sortedFiles = computed(() => {
+  const dir = sortDir.value === 'asc' ? 1 : -1
+  const arr = [...filteredFiles.value]
+  arr.sort((a, b) => {
+    let r = 0
+    switch (sortKey.value) {
+      case 'name':
+        r = displayFileName(a).localeCompare(displayFileName(b), undefined, { numeric: true })
+        break
+      case 'fileSize':
+        r = (a.fileSize ?? 0) - (b.fileSize ?? 0)
+        break
+      case 'printTime':
+        r = (a.metadata?.gcodePrintTimeSeconds ?? 0) - (b.metadata?.gcodePrintTimeSeconds ?? 0)
+        break
+      case 'filament':
+        r = (a.metadata?.filamentUsedGrams ?? 0) - (b.metadata?.filamentUsedGrams ?? 0)
+        break
+      case 'createdAt':
+      default:
+        r = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        break
+    }
+    return r * dir
+  })
+  return arr
 })
 
 // ─── File row list: pagination + selection ──────────────────────
 const filesPage = ref(1)
 const filesPerPage = ref(25)
 const filesPageCount = computed(() =>
-  Math.max(1, Math.ceil(filteredFiles.value.length / filesPerPage.value))
+  Math.max(1, Math.ceil(sortedFiles.value.length / filesPerPage.value))
 )
 const paginatedFiles = computed(() => {
   const start = (filesPage.value - 1) * filesPerPage.value
-  return filteredFiles.value.slice(start, start + filesPerPage.value)
+  return sortedFiles.value.slice(start, start + filesPerPage.value)
 })
-watch([filteredFiles, filesPerPage], () => {
+watch([filteredFiles, filesPerPage, sortKey, sortDir], () => {
   filesPage.value = 1
 })
 
@@ -1138,48 +1257,6 @@ function moveFolderSingle(folder: FolderInfo) {
   bulkMoveDialog.open = true
 }
 
-// ── Drag & drop files onto folder cards ───────────────────────
-function onFileDragStart(file: FileMetadata, ev: DragEvent) {
-  draggedFileId.value = file.fileStorageId
-  if (ev.dataTransfer) {
-    ev.dataTransfer.effectAllowed = 'move'
-    // Firefox needs *some* data on the transfer to fire dragstart.
-    ev.dataTransfer.setData('text/plain', file.fileStorageId)
-  }
-}
-
-function onFileDragEnd() {
-  draggedFileId.value = null
-  dragOverFolderPath.value = null
-}
-
-function onFolderDragOver(path: string, ev: DragEvent) {
-  if (!draggedFileId.value) return
-  if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'
-  dragOverFolderPath.value = path
-}
-
-function onFolderDragLeave(path: string) {
-  if (dragOverFolderPath.value === path) dragOverFolderPath.value = null
-}
-
-async function onFolderDrop(targetPath: string | null) {
-  const fileId = draggedFileId.value
-  draggedFileId.value = null
-  dragOverFolderPath.value = null
-  if (!fileId) return
-
-  try {
-    await FileStorageService.moveFileToFolder(fileId, targetPath)
-    snackbar.info(`Moved to ${targetPath || 'Root'}`)
-    await loadFiles()
-  } catch (err: any) {
-    snackbar.error(
-      err?.response?.data?.error || err?.message || 'Move failed'
-    )
-  }
-}
-
 async function submitBulkMove() {
   if (selected.value.length === 0 && selectedFolders.value.length === 0) return
   const target = bulkMoveDialog.targetPath.trim() || null
@@ -1272,6 +1349,24 @@ const analyzeFile = async (file: FileMetadata) => {
     snackbar.error('Failed to analyze file')
   } finally {
     analyzingFiles.value.delete(file.fileStorageId)
+  }
+}
+
+const downloadingFiles = ref<Set<string>>(new Set())
+const downloadFile = async (file: FileMetadata) => {
+  if (downloadingFiles.value.has(file.fileStorageId)) {
+    return
+  }
+
+  downloadingFiles.value.add(file.fileStorageId)
+
+  try {
+    await FileStorageService.downloadFile(file.fileStorageId, displayFileName(file))
+  } catch (error: any) {
+    console.error('Failed to download file:', error)
+    snackbar.error(error?.response?.data?.error || error?.message || 'Failed to download file')
+  } finally {
+    downloadingFiles.value.delete(file.fileStorageId)
   }
 }
 
@@ -1590,12 +1685,6 @@ const openQueueDialog = (file: FileMetadata) => {
   cursor: pointer;
 }
 
-.files-fs-row--drop {
-  background: rgba(var(--v-theme-primary), 0.16) !important;
-  outline: 2px dashed rgb(var(--v-theme-primary));
-  outline-offset: -2px;
-}
-
 .files-fs-row__icon {
   color: rgb(var(--v-theme-primary));
   flex-shrink: 0;
@@ -1618,33 +1707,6 @@ const openQueueDialog = (file: FileMetadata) => {
   flex-shrink: 0;
 }
 
-.files-breadcrumb__drop {
-  background: rgba(var(--v-theme-primary), 0.16) !important;
-  outline: 2px dashed rgb(var(--v-theme-primary));
-  outline-offset: -2px;
-}
-
-/* Drag handle in file rows */
-.files-row-drag {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: grab;
-}
-
-.files-row-drag:active {
-  cursor: grabbing;
-}
-
-.files-row-drag__handle {
-  color: rgba(var(--v-theme-on-surface), 0.25);
-  flex-shrink: 0;
-  transition: color 0.15s ease;
-}
-
-.files-row-drag:hover .files-row-drag__handle {
-  color: rgba(var(--v-theme-on-surface), 0.6);
-}
 
 .files-folder__menu {
   flex-shrink: 0;
@@ -1665,19 +1727,6 @@ const openQueueDialog = (file: FileMetadata) => {
 .files-folder__menu:hover {
   background: rgba(var(--v-theme-on-surface), 0.08);
   color: rgb(var(--v-theme-on-surface));
-}
-
-/* ─── Bulk action bar ───────────────────────────────────────── */
-.files-bulk-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: rgba(var(--v-theme-primary), 0.08);
-  border-bottom: 1px solid rgba(var(--v-theme-primary), 0.25);
-  position: sticky;
-  top: 0;
-  z-index: 2;
 }
 
 /* ─── Drag overlay ───────────────────────────────────────────── */
@@ -1746,8 +1795,16 @@ const openQueueDialog = (file: FileMetadata) => {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Fixed so the row doesn't resize when its right side swaps between the
+     taller sort selects and the shorter bulk-action buttons. */
+  min-height: 56px;
   padding: 6px 16px;
   border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.fl-head__control {
+  flex: 0 0 auto;
+  width: 176px;
 }
 
 .fl-list {
@@ -1801,7 +1858,6 @@ const openQueueDialog = (file: FileMetadata) => {
 .fl-row__main {
   flex: 1 1 auto;
   min-width: 0;
-  cursor: grab;
 }
 
 .fl-row__name {
@@ -1811,10 +1867,6 @@ const openQueueDialog = (file: FileMetadata) => {
   min-width: 0;
   font-size: 14px;
   font-weight: 600;
-}
-
-.fl-row__drag {
-  color: rgba(var(--v-theme-on-surface), 0.4);
 }
 
 .fl-row__sub {
@@ -1838,13 +1890,14 @@ const openQueueDialog = (file: FileMetadata) => {
    top/bottom edge. Shrink the icon below the chip height to give it vertical
    breathing room. */
 .fl-row__meta :deep(.v-chip) {
-  min-height: 22px;
+  min-height: 26px;
+  font-size: 12px;
 }
 
 .fl-row__meta :deep(.v-chip .v-icon) {
-  font-size: 13px !important;
-  width: 13px;
-  height: 13px;
+  font-size: 15px !important;
+  width: 15px;
+  height: 15px;
 }
 
 .fl-row__actions {

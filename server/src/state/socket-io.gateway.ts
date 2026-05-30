@@ -99,4 +99,8 @@ export const IO_MESSAGES = {
   // operator hears about a 24-hour print finishing without having the
   // dashboard tab in focus.
   PrintJobEvent: "printJob.event",
+  // Intake inbox changed (a file arrived via the API, or an item was
+  // archived/dispatched/discarded). Lets the client refresh the list and
+  // its menu badge, and toast newly-arrived uploads.
+  IntakeEvent: "intake.event",
 };

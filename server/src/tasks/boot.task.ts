@@ -21,6 +21,8 @@ import { FileStorageService } from "@/services/file-storage.service";
 import { BrandingService } from "@/services/core/branding.service";
 import { PrintQueueService } from "@/services/print-queue.service";
 import { PrinterEventsCache } from "@/state/printer-events.cache";
+import { PrinterMaintenanceLogService } from "@/services/orm/printer-maintenance-log.service";
+import { IntakeService } from "@/services/orm/intake.service";
 
 export class BootTask implements TaskService {
   logger: LoggerService;
@@ -43,6 +45,8 @@ export class BootTask implements TaskService {
     private readonly brandingService: BrandingService,
     private readonly printQueueService: PrintQueueService,
     private readonly printerEventsCache: PrinterEventsCache,
+    private readonly printerMaintenanceLogService: PrinterMaintenanceLogService,
+    private readonly intakeService: IntakeService,
   ) {
     this.logger = loggerFactory(BootTask.name);
   }
@@ -60,6 +64,7 @@ export class BootTask implements TaskService {
 
     this.logger.log("Ensuring file storage directories exist");
     await this.fileStorageService.ensureStorageDirectories();
+    await this.intakeService.ensureStagingDir();
 
     this.logger.log("Loading and synchronizing Server Settings");
     await this.settingsStore.loadSettings();
@@ -128,6 +133,16 @@ export class BootTask implements TaskService {
 
     this.logger.log("Clearing upload folder");
     this.multerService.clearUploadsFolder();
+
+    // Heal any printer whose active maintenance log never made it onto the
+    // disabledReason column (older PrinterService.update dropped the field on
+    // persist). Must run BEFORE loadPrinterSockets, which loads the printer
+    // cache that the grid's maintenance badge reads from.
+    const reconciledMaintenance = await this.printerMaintenanceLogService.reconcileActiveDisabledReasons();
+    if (reconciledMaintenance > 0) {
+      this.logger.warn(`Reconciled maintenance disabledReason for ${reconciledMaintenance} printer(s)`);
+    }
+
     this.logger.log("Loading printer sockets");
     await this.printerSocketStore.loadPrinterSockets(); // New sockets
     this.logger.log("Loading floor store");
