@@ -106,6 +106,7 @@ declare module 'vue' {
     SyncPrinterNameAction: typeof import('./components/Generic/Actions/SyncPrinterNameAction.vue')['default']
     TooltipButton: typeof import('./components/Generic/Vuetify/TooltipButton.vue')['default']
     TopBar: typeof import('./components/TopBar.vue')['default']
+    UploadConflictDialog: typeof import('./components/Files/UploadConflictDialog.vue')['default']
     UserManagementSettings: typeof import('./components/Settings/UserManagementSettings.vue')['default']
     YamlImportExportDialog: typeof import('./components/Generic/Dialogs/YamlImportExportDialog.vue')['default']
     YamlImportSummary: typeof import('./components/Generic/YamlImportSummary.vue')['default']

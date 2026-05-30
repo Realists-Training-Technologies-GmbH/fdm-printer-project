@@ -52,12 +52,29 @@ export class FileStorageController {
 
       const folders = await this.fileStorageFolderService.listChildren(requestedFolder);
 
+      // Recursive size + count per child folder, derived from the already-loaded
+      // file list (no extra queries): sum every file whose folderPath is the
+      // child or nested under it. Gives the operator the folder's total weight.
+      const folderStats = (folderPath: string): { fileSize: number; fileCount: number } => {
+        let fileSize = 0;
+        let fileCount = 0;
+        for (const file of all) {
+          const fp: string | null = file.metadata?._folderPath ?? null;
+          if (fp === folderPath || (fp ?? "").startsWith(folderPath + "/")) {
+            fileSize += file.fileSize ?? 0;
+            fileCount += 1;
+          }
+        }
+        return { fileSize, fileCount };
+      };
+
       res.send({
         folderPath: requestedFolder ?? "/",
         folders: folders.map((f) => ({
           path: f.path,
           name: f.name,
           createdAt: f.createdAt,
+          ...folderStats(f.path),
         })),
         files: filtered.map((file) => {
           const thumbnails = (file.metadata?._thumbnails || []).map((thumb: any) => ({

@@ -35,6 +35,10 @@ export interface FolderInfo {
   path: string
   name: string
   createdAt: string | Date
+  /** Recursive total size of files in this folder + subfolders (bytes). */
+  fileSize?: number
+  /** Recursive count of files in this folder + subfolders. */
+  fileCount?: number
 }
 
 export interface FilesListResponse {

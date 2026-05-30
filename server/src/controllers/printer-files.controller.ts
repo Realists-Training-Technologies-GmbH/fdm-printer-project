@@ -196,7 +196,25 @@ export class PrinterFilesController {
   @before(permission(PERMS.PrinterFiles.Get))
   async getPrinterThumbnail(req: Request, res: Response) {
     const { currentPrinterId } = getScopedPrinter(req);
-    const printerThumbnail = await this.printerThumbnailCache.getValue(currentPrinterId);
+    let printerThumbnail = await this.printerThumbnailCache.getValue(currentPrinterId);
+
+    // Reconcile against the live state: the per-printer cache holds whatever was
+    // last set, so if a new print started without the cache catching up (missed
+    // event, boot ordering) it could be empty or hold the PREVIOUS print's image
+    // ("another product's thumbnail"). When the printer is actively printing a
+    // job the cache doesn't match, refresh it on-demand from that job's file
+    // instead of giving up — that's what makes the grid thumbnail actually show.
+    const activeJob = await this.printJobService.getActivePrintJob(currentPrinterId);
+    if (activeJob && activeJob.id !== printerThumbnail?.jobId) {
+      await this.printerThumbnailCache.handleJobStarted(currentPrinterId, activeJob.id);
+      printerThumbnail = await this.printerThumbnailCache.getValue(currentPrinterId);
+      // Still mismatched (e.g. the active file has no embedded thumbnail) →
+      // serve nothing rather than a wrong image.
+      if (printerThumbnail && printerThumbnail.jobId !== activeJob.id) {
+        printerThumbnail = undefined;
+      }
+    }
+
     if (!printerThumbnail) {
       res.send(null);
       return;
