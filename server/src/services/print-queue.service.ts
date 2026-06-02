@@ -204,6 +204,14 @@ export class PrintQueueService implements IPrintQueueService {
     const printerId = job.printerId;
     const oldPosition = job.queuePosition;
 
+    // If the job is mid-upload, abort the in-flight transfer first — otherwise
+    // "remove" only drops the queue position while the upload finishes and the
+    // print starts anyway on a bed the operator wanted cleared. The background
+    // dispatcher then rolls the aborted job back off STARTING.
+    if (job.status === "STARTING" && printerId) {
+      this.cancelDispatch(printerId);
+    }
+
     job.queuePosition = null;
     if (job.status === "QUEUED") {
       job.status = "PENDING";
@@ -350,6 +358,10 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async clearQueue(printerId: number): Promise<void> {
+    // Abort any in-flight transfer so clearing the queue also stops a print that
+    // was mid-upload (it would otherwise start anyway). No-op if none running.
+    this.cancelDispatch(printerId);
+
     const jobs = await this.printJobRepository.find({
       where: {
         printerId,
