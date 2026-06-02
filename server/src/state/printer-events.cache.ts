@@ -200,12 +200,6 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
     const usbDisplayName: string | undefined = payload?.job?.file?.display ?? payload?.job?.file?.name;
     const completion = payload?.progress?.completion;
 
-    // Progress updates continuously and is not a transition, so it runs every
-    // poll (it no-ops when there's no active PRINTING job).
-    if (typeof completion === "number" && filename) {
-      await this.printJobService.markProgress(printerId, filename, completion);
-    }
-
     const prev = this.lastPollState.get(printerId);
 
     if (baseState === "PRINTING" && filename) {
@@ -301,6 +295,15 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
       // Idle / READY / BUSY / ATTENTION — not a tracked transition, but record
       // it so a subsequent PRINTING is detected as a fresh start edge.
       this.lastPollState.set(printerId, baseState);
+    }
+
+    // Progress is not a transition, so update it AFTER the transition logic
+    // above. On a start edge, markProgress matches the active PRINTING job by
+    // printerId (not filename), so running it first would stamp the new print's
+    // progress onto the previous job that handlePrintStarted is about to close
+    // (UNKNOWN). Running it last targets the just-started/adopted job.
+    if (typeof completion === "number" && filename) {
+      await this.printJobService.markProgress(printerId, filename, completion);
     }
   }
 }

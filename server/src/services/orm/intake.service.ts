@@ -80,6 +80,24 @@ export class IntakeService {
     this.stagingPath = join(getMediaPath(), "intake");
   }
 
+  // Per-item async mutex. `getPendingOrThrow` + the resolving operation span
+  // await points with no DB-level claim, so a double-clicked button or two
+  // operators could both pass the PENDING check and double-promote / double-
+  // queue one item. Serializing per id makes the loser see the now-resolved
+  // status and fail cleanly via `getPendingOrThrow`.
+  private readonly itemLocks = new Map<number, Promise<unknown>>();
+
+  private withItemLock<T>(id: number, fn: () => Promise<T>): Promise<T> {
+    const prev = this.itemLocks.get(id) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.itemLocks.set(id, tail);
+    void tail.finally(() => {
+      if (this.itemLocks.get(id) === tail) this.itemLocks.delete(id);
+    });
+    return run;
+  }
+
   async ensureStagingDir(): Promise<void> {
     if (!existsSync(this.stagingPath)) {
       await mkdir(this.stagingPath, { recursive: true });
@@ -264,6 +282,15 @@ export class IntakeService {
     userId: number | null,
     username: string,
   ): Promise<{ fileStorageId: string }> {
+    return this.withItemLock(id, () => this.archiveInner(id, folderPath, userId, username));
+  }
+
+  private async archiveInner(
+    id: number,
+    folderPath: string | null,
+    userId: number | null,
+    username: string,
+  ): Promise<{ fileStorageId: string }> {
     const item = await this.getPendingOrThrow(id);
     const fileStorageId = await this.promoteToFileStorage(item, folderPath);
     await this.markResolved(item, "ARCHIVED", userId, username);
@@ -278,6 +305,15 @@ export class IntakeService {
    * delegate queueing to the same job-creation flow.
    */
   async dispatch(
+    id: number,
+    args: { folderPath: string | null; printerId: number },
+    userId: number | null,
+    username: string,
+  ): Promise<{ fileStorageId: string; printerId: number; jobId: number }> {
+    return this.withItemLock(id, () => this.dispatchInner(id, args, userId, username));
+  }
+
+  private async dispatchInner(
     id: number,
     args: { folderPath: string | null; printerId: number },
     userId: number | null,
@@ -369,6 +405,10 @@ export class IntakeService {
 
   /** Throw away the staged bytes and mark the item discarded. */
   async discard(id: number, userId: number | null, username: string): Promise<void> {
+    return this.withItemLock(id, () => this.discardInner(id, userId, username));
+  }
+
+  private async discardInner(id: number, userId: number | null, username: string): Promise<void> {
     const item = await this.getPendingOrThrow(id);
     if (item.stagingPath && existsSync(item.stagingPath)) {
       try {

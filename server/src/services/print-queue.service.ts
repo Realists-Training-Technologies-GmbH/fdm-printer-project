@@ -168,30 +168,37 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async addToQueue(printerId: number, jobId: number, position?: number): Promise<void> {
-    const job = await this.printJobRepository.findOne({ where: { id: jobId } });
-    if (!job) {
-      throw new Error(`Print job ${jobId} not found`);
-    }
+    // Serialize per printer: `getMaxQueuePosition` + `+1` is a read-modify-write,
+    // so two concurrent adds (e.g. two intake dispatches) could both read the
+    // same max and assign the same queuePosition. The lock makes position
+    // assignment atomic per printer (shared with the dispatch claim, so an add
+    // can't interleave a dispatch's queue read either).
+    await this.withPrinterLock(printerId, async () => {
+      const job = await this.printJobRepository.findOne({ where: { id: jobId } });
+      if (!job) {
+        throw new Error(`Print job ${jobId} not found`);
+      }
 
-    this.ensurePrinterAssignment(job, printerId);
-    await this.ensurePrinterNotInMaintenance(printerId);
+      this.ensurePrinterAssignment(job, printerId);
+      await this.ensurePrinterNotInMaintenance(printerId);
 
-    if (position === undefined || position === null) {
-      const maxPosition = await this.getMaxQueuePosition(printerId);
-      job.queuePosition = (maxPosition ?? -1) + 1;
-    } else {
-      await this.shiftQueuePositions(printerId, position);
-      job.queuePosition = position;
-    }
+      if (position === undefined || position === null) {
+        const maxPosition = await this.getMaxQueuePosition(printerId);
+        job.queuePosition = (maxPosition ?? -1) + 1;
+      } else {
+        await this.shiftQueuePositions(printerId, position);
+        job.queuePosition = position;
+      }
 
-    job.status = "QUEUED";
-    await this.printJobRepository.save(job);
+      job.status = "QUEUED";
+      await this.printJobRepository.save(job);
 
-    this.logger.log(`Added job ${jobId} to printer ${printerId} queue at position ${job.queuePosition}`);
-    this.eventEmitter2.emit("printQueue.jobAdded", {
-      printerId,
-      jobId,
-      position: job.queuePosition,
+      this.logger.log(`Added job ${jobId} to printer ${printerId} queue at position ${job.queuePosition}`);
+      this.eventEmitter2.emit("printQueue.jobAdded", {
+        printerId,
+        jobId,
+        position: job.queuePosition,
+      });
     });
   }
 
@@ -306,16 +313,20 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async reorderQueue(printerId: number, jobIds: number[]): Promise<void> {
-    for (let i = 0; i < jobIds.length; i++) {
-      const job = await this.printJobRepository.findOne({ where: { id: jobIds[i] } });
-      if (job?.printerId === printerId) {
-        job.queuePosition = i;
-        await this.printJobRepository.save(job);
+    // Same per-printer lock: rewriting positions must not interleave with a
+    // concurrent addToQueue (which reads the max) or another reorder.
+    await this.withPrinterLock(printerId, async () => {
+      for (let i = 0; i < jobIds.length; i++) {
+        const job = await this.printJobRepository.findOne({ where: { id: jobIds[i] } });
+        if (job?.printerId === printerId) {
+          job.queuePosition = i;
+          await this.printJobRepository.save(job);
+        }
       }
-    }
 
-    this.logger.log(`Reordered queue for printer ${printerId}`);
-    this.eventEmitter2.emit("printQueue.reordered", { printerId });
+      this.logger.log(`Reordered queue for printer ${printerId}`);
+      this.eventEmitter2.emit("printQueue.reordered", { printerId });
+    });
   }
 
   /**
