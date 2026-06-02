@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import { Readable } from "node:stream";
 import { DataSource } from "typeorm";
 import EventEmitter2 from "eventemitter2";
 import {
@@ -34,6 +35,53 @@ export const silentLoggerFactory: ILoggerFactory = (() =>
       get: () => () => {},
     },
   )) as unknown as ILoggerFactory;
+
+/**
+ * Configurable fake of the per-printer IPrinterApi for dispatch tests. Records
+ * every call and lets a test drive upload/start outcomes (success, transient
+ * 5xx, permanent error, user cancel) without real HTTP.
+ */
+export class FakePrinterApi {
+  calls = {
+    startPrint: [] as string[],
+    uploadFile: [] as any[],
+    createFolder: [] as string[],
+    getFiles: [] as Array<{ recursive?: boolean; startDir?: string }>,
+    deleteFile: [] as string[],
+  };
+  /** Files the temp-folder sweep should find (default: none). */
+  tempFiles: Array<{ path: string }> = [];
+  /** Override to make uploadFile succeed/fail/hang. Receives the upload input. */
+  uploadBehavior: (input: any) => Promise<void> = async () => {};
+  /** Override to make startPrint succeed/fail. */
+  startPrintBehavior: (path: string) => Promise<void> = async () => {};
+
+  async startPrint(path: string): Promise<void> {
+    this.calls.startPrint.push(path);
+    await this.startPrintBehavior(path);
+  }
+  async uploadFile(input: any): Promise<void> {
+    this.calls.uploadFile.push(input);
+    await this.uploadBehavior(input);
+  }
+  async createFolder(path: string): Promise<void> {
+    this.calls.createFolder.push(path);
+  }
+  async getFiles(recursive?: boolean, startDir?: string): Promise<{ files: Array<{ path: string }> }> {
+    this.calls.getFiles.push({ recursive, startDir });
+    return { files: this.tempFiles };
+  }
+  async deleteFile(path: string): Promise<void> {
+    this.calls.deleteFile.push(path);
+  }
+}
+
+export interface QueueServiceOptions {
+  /** The fake IPrinterApi returned by printerApiFactory.getById for any printer. */
+  printerApi?: FakePrinterApi;
+  /** File size reported by the stub FileStorageService.getFileSize. */
+  fileSize?: number;
+}
 
 /**
  * Spin up an in-memory SQLite DataSource with the full schema (synchronize:
@@ -87,7 +135,7 @@ export interface TrackingHarness {
    */
   seedLiveState(sim: PrusaBuddySimulator, printerId: number): Promise<void>;
   /** Build a real PrintQueueService sharing this harness's DB + events cache. */
-  makePrintQueueService(): PrintQueueService;
+  makePrintQueueService(opts?: QueueServiceOptions): PrintQueueService;
   destroy(): Promise<void>;
 }
 
@@ -151,14 +199,21 @@ export async function createTrackingHarness(printerName = "XL-1"): Promise<Track
       );
       await eventsCache.setEvent(printerId, "current", payload);
     },
-    makePrintQueueService() {
+    makePrintQueueService(opts: QueueServiceOptions = {}) {
+      const printerApi = opts.printerApi ?? new FakePrinterApi();
+      const fileSize = opts.fileSize ?? 1024;
+      const printerApiFactory = { getById: () => printerApi } as any;
+      const fileStorageService = {
+        getFileSize: () => fileSize,
+        readFileStream: () => Readable.from([Buffer.alloc(fileSize)]),
+      } as any;
       return new PrintQueueService(
         silentLoggerFactory,
         typeormService,
         eventEmitter,
-        {} as any, // printerApiFactory — unused by ensurePrinterIdle
-        {} as any, // fileStorageService — unused
-        {} as any, // printerSocketStore — unused
+        printerApiFactory,
+        fileStorageService,
+        {} as any, // printerSocketStore — unused by these tests
         { hasActiveByPrinterId: async () => false } as any, // maintenance log
         eventsCache,
       );
