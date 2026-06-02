@@ -344,6 +344,14 @@
                 v-if="queue.length > 0"
                 class="pdv-section__hint"
               >{{ queue.length }} job{{ queue.length === 1 ? '' : 's' }}</span>
+              <span
+                v-if="queue.length > 1"
+                class="pdv-section__hint pdv-queue-draghint"
+                title="Drag any queue card to reorder"
+              >
+                <v-icon size="13">drag_indicator</v-icon>
+                drag to reorder
+              </span>
               <v-spacer />
               <!-- "Send to print" lives on the next-up hero card below,
                    so a second "Process next" button in the section
@@ -3660,6 +3668,35 @@ function filamentTotal(v: number | number[] | null | undefined): number {
 .pdv-queue-row:hover {
   background: rgba(var(--v-theme-primary), 0.06);
   border-color: rgba(var(--v-theme-primary), 0.18);
+}
+
+/* ── Queue drag-and-drop reorder ──
+   The whole card is the drag handle. Only show the grab affordance on cards
+   that are actually draggable (the transferring head sets draggable=false). */
+.pdv-hero[draggable='true'],
+.pdv-queue-row[draggable='true'] {
+  cursor: grab;
+}
+.pdv-hero[draggable='true']:active,
+.pdv-queue-row[draggable='true']:active {
+  cursor: grabbing;
+}
+/* The card being dragged fades back so the drop target reads clearly. */
+.pdv-queue--dragging {
+  opacity: 0.45;
+}
+/* The card under the pointer gets a dashed primary outline. */
+.pdv-queue--drop-target {
+  outline: 2px dashed rgb(var(--v-theme-primary));
+  outline-offset: 2px;
+  background: rgba(var(--v-theme-primary), 0.08) !important;
+}
+/* Stop the thumbnail <img> from hijacking the drag as a native image drag,
+   so the gesture always reorders the card. */
+.pdv-hero :deep(img),
+.pdv-queue-row :deep(img) {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 /* Position badge: small circular chip carrying the queue index so
