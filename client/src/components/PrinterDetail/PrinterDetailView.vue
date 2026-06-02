@@ -401,7 +401,7 @@
                     :class="{
                       'pdv-hero--starting': queue[0].status === 'STARTING',
                       'pdv-queue--dragging': draggingIndex === 0,
-                      'pdv-queue--drop-target': dragOverIndex === 0,
+                      'pdv-queue--drop-above': dragOverIndex === 0 && draggingIndex !== null && draggingIndex > 0,
                     }"
                     :draggable="queue.length > 1 && queue[0].status !== 'STARTING'"
                     @dragstart="onQueueDragStart(0, $event)"
@@ -416,6 +416,12 @@
                          filename wraps below. -->
                     <div class="pdv-hero__top">
                       <div class="pdv-hero__label">
+                        <v-icon
+                          v-if="queue.length > 1 && queue[0].status !== 'STARTING'"
+                          class="pdv-queue__grip"
+                          size="16"
+                          title="Drag to reorder"
+                        >drag_indicator</v-icon>
                         <v-icon size="x-small">north_east</v-icon>
                         Next up
                       </div>
@@ -520,14 +526,22 @@
                        so the operator can scan what's coming next
                        without expanding anything. Position labels
                        start at 2 since the hero above is position 1. -->
-                  <ol v-if="queue.length > 1" class="pdv-queue-list">
+                  <TransitionGroup
+                    v-if="queue.length > 1"
+                    name="pdv-queue-flip"
+                    tag="ol"
+                    class="pdv-queue-list"
+                  >
                     <li
                       v-for="(job, idx) in queue.slice(1)"
                       :key="job.id"
                       class="pdv-queue-row"
                       :class="{
                         'pdv-queue--dragging': draggingIndex === idx + 1,
-                        'pdv-queue--drop-target': dragOverIndex === idx + 1,
+                        'pdv-queue--drop-above':
+                          dragOverIndex === idx + 1 && draggingIndex !== null && draggingIndex > idx + 1,
+                        'pdv-queue--drop-below':
+                          dragOverIndex === idx + 1 && draggingIndex !== null && draggingIndex < idx + 1,
                       }"
                       draggable="true"
                       @dragstart="onQueueDragStart(idx + 1, $event)"
@@ -536,6 +550,7 @@
                       @drop.prevent="onQueueDrop(idx + 1)"
                       @dragend="onQueueDragEnd()"
                     >
+                      <v-icon class="pdv-queue__grip" size="14">drag_indicator</v-icon>
                       <span class="pdv-queue-row__pos">{{ idx + 2 }}</span>
                       <div class="pdv-queue-row__thumb">
                         <FileThumbnailCell
@@ -594,7 +609,7 @@
                         <v-icon size="14">close</v-icon>
                       </v-btn>
                     </li>
-                  </ol>
+                  </TransitionGroup>
                 </template>
               </v-card-text>
             </v-card>
@@ -3673,24 +3688,70 @@ function filamentTotal(v: number | number[] | null | undefined): number {
 /* ── Queue drag-and-drop reorder ──
    The whole card is the drag handle. Only show the grab affordance on cards
    that are actually draggable (the transferring head sets draggable=false). */
+.pdv-queue-row {
+  position: relative; /* anchor the insertion line + grip */
+}
 .pdv-hero[draggable='true'],
 .pdv-queue-row[draggable='true'] {
   cursor: grab;
+  user-select: none;
 }
 .pdv-hero[draggable='true']:active,
 .pdv-queue-row[draggable='true']:active {
   cursor: grabbing;
 }
-/* The card being dragged fades back so the drop target reads clearly. */
+
+/* The lifted card: fade + shrink slightly so the destination reads clearly. */
 .pdv-queue--dragging {
-  opacity: 0.45;
+  opacity: 0.4;
+  transform: scale(0.98);
 }
-/* The card under the pointer gets a dashed primary outline. */
-.pdv-queue--drop-target {
-  outline: 2px dashed rgb(var(--v-theme-primary));
-  outline-offset: 2px;
-  background: rgba(var(--v-theme-primary), 0.08) !important;
+
+/* Directional insertion line — a glowing bar showing exactly where the card
+   will land (above the target when dragging up, below when dragging down). */
+.pdv-queue--drop-above::before,
+.pdv-queue--drop-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 3px;
+  background: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 7px rgba(var(--v-theme-primary), 0.65);
+  z-index: 3;
+  pointer-events: none;
 }
+.pdv-queue--drop-above::before {
+  top: -3.5px;
+}
+.pdv-queue--drop-below::after {
+  bottom: -3.5px;
+}
+
+/* Grip affordance: faint by default, brightens on card hover. The whole card
+   is still the drag handle — this only signals draggability. */
+.pdv-queue__grip {
+  color: rgb(var(--v-theme-on-surface));
+  opacity: 0.22;
+  cursor: grab;
+  transition: opacity 0.12s ease;
+  flex-shrink: 0;
+}
+.pdv-hero:hover .pdv-queue__grip,
+.pdv-queue-row:hover .pdv-queue__grip {
+  opacity: 0.55;
+}
+
+/* Smooth FLIP animation when rows shuffle to their new positions. */
+.pdv-queue-flip-move {
+  transition: transform 0.24s cubic-bezier(0.2, 0, 0, 1);
+}
+/* Keep the dragged row out of the FLIP transition so it tracks the cursor. */
+.pdv-queue-flip-leave-active {
+  transition: none;
+}
+
 /* Stop the thumbnail <img> from hijacking the drag as a native image drag,
    so the gesture always reorders the card. */
 .pdv-hero :deep(img),
