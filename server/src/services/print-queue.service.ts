@@ -11,6 +11,7 @@ import { PrinterSocketStore } from "@/state/printer-socket.store";
 import { SOCKET_STATE } from "@/shared/dtos/socket-state.type";
 import { API_STATE } from "@/shared/dtos/api-state.type";
 import { PrinterMaintenanceLogService } from "@/services/orm/printer-maintenance-log.service";
+import { PrinterEventsCache } from "@/state/printer-events.cache";
 import { BadRequestException } from "@/exceptions/runtime.exceptions";
 import { uploadProgressEvent } from "@/constants/event.constants";
 import { v4 as uuidv4 } from "uuid";
@@ -120,6 +121,7 @@ export class PrintQueueService implements IPrintQueueService {
     private readonly fileStorageService: FileStorageService,
     private readonly printerSocketStore: PrinterSocketStore,
     private readonly printerMaintenanceLogService: PrinterMaintenanceLogService,
+    private readonly printerEventsCache: PrinterEventsCache,
   ) {
     this.printJobRepository = typeormService.getDataSource().getRepository(PrintJob);
     this.printerRepository = typeormService.getDataSource().getRepository(Printer);
@@ -407,6 +409,14 @@ export class PrintQueueService implements IPrintQueueService {
   // firmware or silently clobber the running job's tracking. STARTING is
   // included because that's our own "upload in flight" marker — the printer is
   // already receiving bytes and a second dispatch would collide on the wire.
+  //
+  // Stale-job reconciliation: the DB row is only as good as the last poll edge
+  // we observed. If a print's terminal transition was missed (poll gap, server
+  // downtime, a finish routed through ATTENTION), a PRINTING/PAUSED row lingers
+  // and the printer becomes permanently un-dispatchable even though it is
+  // physically idle. So before blocking, cross-check the live hardware state:
+  // if the latest fresh poll says the printer is unambiguously idle, the row is
+  // a zombie — close it as UNKNOWN and let the new print through.
   private async ensurePrinterIdle(printerId: number, exceptJobId: number): Promise<void> {
     const active = await this.printJobRepository.findOne({
       where: [
@@ -417,10 +427,61 @@ export class PrintQueueService implements IPrintQueueService {
       order: { startedAt: "DESC" },
     });
 
-    if (active && active.id !== exceptJobId) {
-      throw new BadRequestException(
-        `Printer ${printerId} is busy with job ${active.id} (${active.status}) and cannot start another print.`,
-      );
+    if (!active || active.id === exceptJobId) {
+      return;
+    }
+
+    // STARTING is never reconciled away: an upload legitimately coexists with an
+    // idle-reading printer (bytes are still streaming, Print-After-Upload hasn't
+    // fired yet), so a STARTING row is a real in-flight dispatch, not a zombie.
+    if (active.status !== "STARTING") {
+      const liveState = await this.getFreshLiveState(printerId);
+      if (liveState && PrintQueueService.LIVE_IDLE_STATES.has(liveState)) {
+        const staleStatus = active.status;
+        active.status = "UNKNOWN";
+        active.statusReason =
+          `Reconciled on dispatch: printer reported ${liveState} while the job was still ${staleStatus}. ` +
+          `The terminal transition was missed; marked UNKNOWN so the printer could accept a new print.`;
+        await this.printJobRepository.save(active);
+        this.logger.warn(
+          `Printer ${printerId}: cleared stale ${staleStatus} job ${active.id} (live state ${liveState}) ` +
+            `before dispatching job ${exceptJobId}.`,
+        );
+        return;
+      }
+    }
+
+    throw new BadRequestException(
+      `Printer ${printerId} is busy with job ${active.id} (${active.status}) and cannot start another print.`,
+    );
+  }
+
+  // Live printer states that mean "genuinely doing nothing" — safe to treat a
+  // lingering active DB job as stale. BUSY and ATTENTION are deliberately
+  // excluded: verified against Buddy firmware (src/state/printer_state.cpp),
+  // BUSY is emitted mid-print during automatic crash-recovery / power-panic
+  // resume, and ATTENTION is an ambiguous hold (runout / prompt) — neither
+  // proves the printer is free. (Tool changes stay PRINTING, not BUSY.)
+  private static readonly LIVE_IDLE_STATES = new Set(["READY", "IDLE", "FINISHED", "STOPPED"]);
+  // Ignore a poll snapshot older than this when deciding a job is stale.
+  // Comfortably above the max poll interval (60s) so one missed tick is fine,
+  // yet short enough that an offline printer's last reading can't auto-clear a
+  // job — when stale/missing we fall back to blocking, the conservative choice.
+  private static readonly LIVE_STATE_MAX_AGE_MS = 120_000;
+
+  // Most recent PrusaLink link_state polled for this printer, upper-cased, or
+  // undefined when we have no fresh snapshot (never polled, offline, or stale).
+  private async getFreshLiveState(printerId: number): Promise<string | undefined> {
+    try {
+      const events = await this.printerEventsCache.getPrinterSocketEvents(printerId);
+      const current = (events as any)?.current;
+      if (!current) return undefined;
+      const ageMs = Date.now() - (current.receivedAt ?? 0);
+      if (ageMs > PrintQueueService.LIVE_STATE_MAX_AGE_MS) return undefined;
+      const state: string | undefined = current.payload?.state?.text;
+      return state?.toUpperCase();
+    } catch {
+      return undefined;
     }
   }
 
