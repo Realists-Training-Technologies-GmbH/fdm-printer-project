@@ -14,8 +14,8 @@ const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 /**
  * Exercises the real dispatch execution path (dispatchInBackground →
  * dispatchToPrinter) with a fake IPrinterApi: success, permanent failure,
- * transient retry, user cancel, temp-folder cleanup — plus the queue
- * auto-advance that fires the next job when one finishes.
+ * transient retry, user cancel, temp-folder cleanup — plus the guarantee that
+ * dispatch is MANUAL only (no auto-advance when a job finishes).
  */
 describe("dispatch execution — upload, retry, cancel", () => {
   let h: TrackingHarness;
@@ -159,12 +159,10 @@ describe("dispatch execution — upload, retry, cancel", () => {
     expect(failed[0]).toMatchObject({ cancelled: true });
   });
 
-  it("auto-advances the queue: completing a job dispatches the next QUEUED one", async () => {
+  it("does NOT auto-advance: completing a job leaves the next one QUEUED (manual dispatch only)", async () => {
     const api = new FakePrinterApi();
     const queue = h.makePrintQueueService({ printerApi: api });
-    // processQueue gates on connectivity — report the printer as reachable.
     (queue as any).isPrinterConnected = () => ({ connected: true });
-    // Next job waiting in the queue.
     await repo().save(
       repo().create({
         printerId: PRINTER_ID,
@@ -176,12 +174,37 @@ describe("dispatch execution — upload, retry, cancel", () => {
       }),
     );
 
-    const submitted = new Promise((res) => h.eventEmitter.once("printQueue.jobSubmitted", res));
-    // A previous job just finished on this printer.
+    // A previous print just finished/failed/cancelled. The operator still has to
+    // remove the part and clear the bed, so NOTHING should auto-dispatch.
     h.eventEmitter.emit("printJob.completed", { printerId: PRINTER_ID });
+    h.eventEmitter.emit("printJob.failed", { printerId: PRINTER_ID });
+    h.eventEmitter.emit("printJob.cancelled", { printerId: PRINTER_ID });
+    await tick(20);
+
+    expect(api.calls.startPrint).toHaveLength(0);
+    expect((await repo().findOneBy({ fileName: "next.bgcode" }))?.status).toBe("QUEUED");
+  });
+
+  it("manual processQueue dispatches the head job (operator-triggered after clearing the bed)", async () => {
+    const api = new FakePrinterApi();
+    const queue = h.makePrintQueueService({ printerApi: api });
+    (queue as any).isPrinterConnected = () => ({ connected: true });
+    await repo().save(
+      repo().create({
+        printerId: PRINTER_ID,
+        fileName: "head.bgcode",
+        status: "QUEUED",
+        queuePosition: 0,
+        usbFilePath: "head.bgcode",
+        metadata: null,
+      }),
+    );
+
+    const submitted = new Promise((res) => h.eventEmitter.once("printQueue.jobSubmitted", res));
+    await queue.processQueue(PRINTER_ID); // the manual "process next" action
     await submitted;
 
-    expect(api.calls.startPrint).toEqual(["next.bgcode"]);
-    expect((await repo().findOneBy({ fileName: "next.bgcode" }))?.status).toBe("PRINTING");
+    expect(api.calls.startPrint).toEqual(["head.bgcode"]);
+    expect((await repo().findOneBy({ fileName: "head.bgcode" }))?.status).toBe("PRINTING");
   });
 });

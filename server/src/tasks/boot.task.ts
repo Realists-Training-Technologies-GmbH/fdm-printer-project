@@ -125,7 +125,7 @@ export class BootTask implements TaskService {
     // Recover queue dispatches that were mid-upload when the server stopped.
     // Their TCP streams died with the process so the printer never got the
     // full file — roll them back to QUEUED with a clear statusReason so the
-    // user (or auto-advance) can retry instead of leaving them stuck.
+    // operator can retry via "process next" instead of leaving them stuck.
     const recovered = await this.printQueueService.resetStrandedDispatches();
     if (recovered > 0) {
       this.logger.warn(`Recovered ${recovered} stranded queue dispatch(es) from previous run`);

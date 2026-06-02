@@ -388,7 +388,20 @@
                        direct "Send to print" button so the operator
                        doesn't have to scan back up to the toolbar to
                        dispatch. -->
-                  <article class="pdv-hero" :class="{ 'pdv-hero--starting': queue[0].status === 'STARTING' }">
+                  <article
+                    class="pdv-hero"
+                    :class="{
+                      'pdv-hero--starting': queue[0].status === 'STARTING',
+                      'pdv-queue--dragging': draggingIndex === 0,
+                      'pdv-queue--drop-target': dragOverIndex === 0,
+                    }"
+                    :draggable="queue.length > 1 && queue[0].status !== 'STARTING'"
+                    @dragstart="onQueueDragStart(0, $event)"
+                    @dragover.prevent="onQueueDragOver(0)"
+                    @dragleave="onQueueDragLeave(0)"
+                    @drop.prevent="onQueueDrop(0)"
+                    @dragend="onQueueDragEnd()"
+                  >
                     <!-- Top row: label + remove. The X gets pinned to
                          the upper-right of the hero so it has a
                          consistent corner regardless of how the
@@ -504,6 +517,16 @@
                       v-for="(job, idx) in queue.slice(1)"
                       :key="job.id"
                       class="pdv-queue-row"
+                      :class="{
+                        'pdv-queue--dragging': draggingIndex === idx + 1,
+                        'pdv-queue--drop-target': dragOverIndex === idx + 1,
+                      }"
+                      draggable="true"
+                      @dragstart="onQueueDragStart(idx + 1, $event)"
+                      @dragover.prevent="onQueueDragOver(idx + 1)"
+                      @dragleave="onQueueDragLeave(idx + 1)"
+                      @drop.prevent="onQueueDrop(idx + 1)"
+                      @dragend="onQueueDragEnd()"
                     >
                       <span class="pdv-queue-row__pos">{{ idx + 2 }}</span>
                       <div class="pdv-queue-row__thumb">
@@ -2356,6 +2379,83 @@ async function loadQueue() {
     })
   } finally {
     queueLoading.value = false
+  }
+}
+
+// ── Queue drag-and-drop reorder ──
+// The entire hero / row is the drag handle (draggable lives on the card
+// element itself, so the gesture works anywhere on the card). The head
+// (queue[0]) is locked while it's transferring (STARTING): you can't drag a
+// job that's mid-upload, nor drop another job ahead of it.
+const draggingIndex = ref<number | null>(null)
+const dragOverIndex = ref<number | null>(null)
+const queueReordering = ref(false)
+
+function queueHeadLocked(): boolean {
+  return queue.value[0]?.status === 'STARTING'
+}
+
+function onQueueDragStart(index: number, ev: DragEvent) {
+  draggingIndex.value = index
+  if (ev.dataTransfer) {
+    ev.dataTransfer.effectAllowed = 'move'
+    // Firefox only fires drag events when some data is set.
+    ev.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onQueueDragOver(index: number) {
+  if (draggingIndex.value === null || draggingIndex.value === index) return
+  // Can't drop ahead of a job that's currently transferring.
+  if (index === 0 && queueHeadLocked()) return
+  dragOverIndex.value = index
+}
+
+function onQueueDragLeave(index: number) {
+  if (dragOverIndex.value === index) dragOverIndex.value = null
+}
+
+function onQueueDragEnd() {
+  draggingIndex.value = null
+  dragOverIndex.value = null
+}
+
+function onQueueDrop(target: number) {
+  const source = draggingIndex.value
+  draggingIndex.value = null
+  dragOverIndex.value = null
+  if (source === null || source === target) return
+  // Never displace a transferring head.
+  if (target === 0 && queueHeadLocked()) return
+
+  const reordered = [...queue.value]
+  const [moved] = reordered.splice(source, 1)
+  reordered.splice(target, 0, moved)
+  applyQueueReorder(reordered)
+}
+
+async function applyQueueReorder(reordered: QueuedJob[]) {
+  if (queueReordering.value) return
+
+  const previous = queue.value
+  queue.value = reordered // optimistic update for snappy feedback
+  queueReordering.value = true
+  try {
+    const response = await PrintQueueService.reorderQueue(
+      props.printerId,
+      reordered.map((j) => j.id),
+    )
+    queue.value = response.queue ?? reordered
+    notifyPrintJobsChanged({ printerId: props.printerId, reason: 'detailview:reorder' })
+  } catch (e: any) {
+    queue.value = previous // roll back the optimistic move
+    snackbar.openErrorMessage({
+      title: 'Could not reorder queue',
+      subtitle: e?.message ?? 'Unknown error',
+    })
+    await loadQueue()
+  } finally {
+    queueReordering.value = false
   }
 }
 

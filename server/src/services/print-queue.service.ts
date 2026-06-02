@@ -137,21 +137,13 @@ export class PrintQueueService implements IPrintQueueService {
     this.eventEmitter2 = eventEmitter2;
     this.logger = loggerFactory(PrintQueueService.name);
 
-    // Auto-advance the queue: when the active job reaches a terminal state, try
-    // to dispatch the next queued job. Best-effort — the printer might be
-    // offline or there may be nothing queued, so failures are only logged.
-    const advance = (event: { printerId?: number }) => {
-      const printerId = event?.printerId;
-      if (!printerId) return;
-      this.processQueue(printerId).catch((error) => {
-        this.logger.debug(
-          `Queue auto-advance skipped for printer ${printerId}: ${error instanceof Error ? error.message : error}`,
-        );
-      });
-    };
-    this.eventEmitter2.on("printJob.completed", advance);
-    this.eventEmitter2.on("printJob.failed", advance);
-    this.eventEmitter2.on("printJob.cancelled", advance);
+    // NO auto-advance. Dispatching the next queued job is a deliberate MANUAL
+    // action (`POST /print-queue/:printerId/process` → processQueue). On an FDM
+    // farm without automatic part ejection, an operator must physically remove
+    // the finished part and clear the bed before the next print — starting it
+    // automatically would print into the previous part (nozzle/bed crash, ruined
+    // job). So completing/failing/cancelling a print does NOT trigger the next;
+    // the operator clears the bed, then presses "process next".
   }
 
   private isPrinterConnected(printerId: number): { connected: boolean; reason?: string } {
@@ -324,7 +316,7 @@ export class PrintQueueService implements IPrintQueueService {
    * A STARTING job represents an upload that was in flight when the server
    * stopped. The actual TCP upload died with the process, so the printer
    * never received the full file. Roll these back to QUEUED with a clear
-   * statusReason so the user (or queue auto-advance) can retry.
+   * statusReason so the operator can retry via "process next".
    *
    * queuePosition is left intact so the job keeps its slot.
    */
@@ -660,8 +652,8 @@ export class PrintQueueService implements IPrintQueueService {
       this.logger.log(`Successfully submitted job ${jobId} to printer ${printerId}`);
       this.eventEmitter2.emit("printQueue.jobSubmitted", { printerId, jobId });
     } catch (error) {
-      // Re-read and roll back to QUEUED so the next "process next" (or
-      // auto-advance) can retry. queuePosition is left intact so the job
+      // Re-read and roll back to QUEUED so the operator can retry via the
+      // manual "process next". queuePosition is left intact so the job
       // stays in its slot.
       job = (await this.printJobRepository.findOne({ where: { id: jobId } })) ?? job;
       job.status = "QUEUED";
