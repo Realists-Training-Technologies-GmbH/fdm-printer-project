@@ -70,7 +70,6 @@ export interface IPrintJobService {
   handlePrintCancelled(printerId: number, reason?: string): Promise<PrintJob | null>;
   handlePrintPaused(printerId: number): Promise<PrintJob | null>;
   handlePrintResumed(printerId: number): Promise<PrintJob | null>;
-  cleanupStaleJobs(): Promise<void>;
   getActivePrintJob(printerId: number): Promise<PrintJob | null>;
   getPrintJobHistory(printerId: number, limit?: number): Promise<PrintJob[]>;
   /** All jobs the DB believes are currently printing/paused across every printer. */
@@ -516,29 +515,6 @@ export class PrintJobService implements IPrintJobService {
 
     this.logger.log(`Print job ${job.id} resumed on printer ${printerId}`);
     return job;
-  }
-
-  async cleanupStaleJobs(): Promise<void> {
-    const staleJobs = await this.printJobRepository.find({
-      where: { status: "PRINTING" },
-    });
-
-    for (const job of staleJobs) {
-      job.status = "UNKNOWN";
-      job.statusReason =
-        "Print state unknown after server restart. The print may have completed, " +
-        "failed, or still be running. Check your printer for current status.";
-      await this.printJobRepository.save(job);
-
-      this.logger.warn(
-        `Marked job ${job.id} (printer ${job.printerId}) as UNKNOWN after startup - ` +
-          `was PRINTING before server stopped`,
-      );
-    }
-
-    if (staleJobs.length > 0) {
-      this.logger.log(`Cleaned up ${staleJobs.length} stale print job(s) on startup`);
-    }
   }
 
   async getActivePrintJob(printerId: number): Promise<PrintJob | null> {
