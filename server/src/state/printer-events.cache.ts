@@ -1,5 +1,5 @@
 import { KeyDiffCache } from "@/utils/cache/key-diff.cache";
-import { printerEvents, PrintersDeletedEvent } from "@/constants/event.constants";
+import { printerEvents, PrintersDeletedEvent, type PrinterUpdatedEvent } from "@/constants/event.constants";
 import EventEmitter2 from "eventemitter2";
 import { prusaLinkEvent } from "@/services/prusa-link/constants/prusalink.constants";
 import type { PrusaLinkEventDto } from "@/services/prusa-link/constants/prusalink-event.dto";
@@ -135,6 +135,20 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
   private subscribeToEvents() {
     this.eventEmitter2.on(prusaLinkEvent("*"), (e) => this.onPrusaLinkPollMessage(e));
     this.eventEmitter2.on(printerEvents.printersDeleted, this.handlePrintersDeleted.bind(this));
+    this.eventEmitter2.on(printerEvents.printerUpdated, this.handlePrinterUpdated.bind(this));
+  }
+
+  // When a printer is disabled its poller is torn down (printer-socket.store),
+  // so the cached live snapshot would otherwise freeze at its last reading and
+  // keep being fanned out to clients, and a stale `lastPollState` would trip a
+  // spurious "missed terminal edge" on re-enable. Clear both on disable.
+  private async handlePrinterUpdated(event: PrinterUpdatedEvent) {
+    const printer = event?.printer;
+    if (!printer?.id) return;
+    if (printer.enabled === false) {
+      this.lastPollState.delete(printer.id);
+      await this.deletePrinterSocketEvents(printer.id);
+    }
   }
 
   private async getPrinterName(printerId: number): Promise<string | undefined> {
