@@ -2244,6 +2244,10 @@ async function processNextInQueue() {
       title: 'Sent to printer',
       subtitle: head ? displayQueueName(head) : null,
     })
+    // Reveal the full hero header: that's where the transfer block + progress
+    // now show. If the operator had scrolled down to the queue/storage lists
+    // they'd otherwise miss it (and the header would still be collapsed).
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (e: any) {
     snackbar.openErrorMessage({
       title: 'Could not start next job',
