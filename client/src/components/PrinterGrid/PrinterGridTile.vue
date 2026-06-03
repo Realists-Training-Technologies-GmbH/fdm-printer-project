@@ -133,15 +133,17 @@
 
             <v-progress-linear
               v-if="uploadProgress"
-              :model-value="uploadProgress.percent"
-              :indeterminate="uploadProgress.percent === 0"
+              :model-value="uploadProgress.percent ?? 0"
+              :indeterminate="uploadProgress.percent == null"
               color="info"
               bg-color="rgba(255,255,255,0.08)"
               height="5"
               rounded
               striped
               class="pg-tile__progress"
-              :title="`Transferring · ${uploadProgress.percent}% · ${uploadProgress.fileName}`"
+              :title="uploadProgress.percent != null
+                ? `Transferring · ${uploadProgress.percent}% · ${uploadProgress.fileName}`
+                : `Transferring · ${uploadProgress.fileName}`"
             />
             <v-progress-linear
               v-else-if="currentProgress !== undefined"
@@ -181,7 +183,7 @@
               </v-tooltip>
 
               <span
-                v-if="uploadProgress"
+                v-if="uploadProgress && uploadProgress.percent != null"
                 class="pg-tile__percent"
                 title="Transferring file to printer"
               >
@@ -551,18 +553,21 @@ const currentProgress = computed(() => {
 //     starts appearing once the printer has acknowledged some data.
 // Prefer the firmware number when present; fall back to axios so the
 // initial moments (handshake, first packet) still show a non-zero bar.
-const uploadProgress = computed<{ percent: number; fileName: string } | null>(() => {
+const uploadProgress = computed<{ percent: number | null; fileName: string } | null>(() => {
   if (!printerId.value) return null
   const entry = printerStateStore.queueUploadsByPrinterId[printerId.value]
   if (!entry) return null
+  // Firmware transfer.progress only (bytes the printer has flushed to its
+  // storage). We deliberately do NOT fall back to axios bytes: over LAN the
+  // server hands the whole file to the kernel send buffer almost instantly,
+  // so axios races to 100% and then the slower-but-truthful firmware number
+  // resets the bar to ~1% and climbs — a jarring "100% → reset → 1…100".
+  // `percent` stays null until the firmware reports a real 0–1 value, so the
+  // bar renders indeterminate (a moving "streaming" animation) until then.
   const firmwareTransfer = (printerStateStore.printerEventsById[printerId.value]?.current?.payload as any)
     ?.transfer
-  const firmwarePct =
-    firmwareTransfer && typeof firmwareTransfer.progress === "number" && firmwareTransfer.progress >= 0
-      ? Math.round(firmwareTransfer.progress * 100)
-      : null
-  const axiosPct = entry.progress === null ? 0 : Math.round(entry.progress * 100)
-  const percent = firmwarePct !== null ? firmwarePct : axiosPct
+  const raw = firmwareTransfer?.progress
+  const percent = typeof raw === "number" && raw >= 0 && raw <= 1 ? Math.round(raw * 100) : null
   return { percent, fileName: entry.fileName }
 })
 
