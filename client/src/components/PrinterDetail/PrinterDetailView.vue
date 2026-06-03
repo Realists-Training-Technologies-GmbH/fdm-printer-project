@@ -2557,46 +2557,6 @@ const transferFileName = computed(() =>
   uploadProgress.value?.fileName ?? (queue.value[0] ? displayQueueName(queue.value[0]) : '—'),
 )
 
-// After a transfer COMPLETES, the printer starts the print but the firmware
-// only reports PRINTING on its next poll (~5s). In that gap the transferred
-// job has already left the queue, so the next job surfaces as "next up" with
-// an enabled Send button — letting an operator dispatch a second file onto a
-// printer that's spinning up a print. Hold the button across that gap.
-//
-// We only settle when the transferring job LEFT the queue (a real print
-// start); if it rolled back to QUEUED (cancelled/failed) it's still in the
-// list, so there's nothing starting and no need to block. isPrinting clears
-// the lock as soon as it confirms; the timeout is just a safety fallback.
-const dispatchSettling = ref(false)
-let dispatchSettlingTimer: ReturnType<typeof setTimeout> | null = null
-let lastTransferringJobId: number | null = null
-function clearDispatchSettling() {
-  dispatchSettling.value = false
-  if (dispatchSettlingTimer) {
-    clearTimeout(dispatchSettlingTimer)
-    dispatchSettlingTimer = null
-  }
-}
-watch(headIsTransferring, (now, prev) => {
-  if (now) {
-    lastTransferringJobId = queue.value[0]?.id ?? null
-    clearDispatchSettling()
-  } else if (prev) {
-    const jobLeftQueue =
-      lastTransferringJobId != null && !queue.value.some((j) => j.id === lastTransferringJobId)
-    lastTransferringJobId = null
-    if (jobLeftQueue) {
-      dispatchSettling.value = true
-      if (dispatchSettlingTimer) clearTimeout(dispatchSettlingTimer)
-      dispatchSettlingTimer = setTimeout(() => clearDispatchSettling(), 15000)
-    }
-  }
-})
-watch(isPrinting, () => {
-  if (isPrinting.value) clearDispatchSettling()
-})
-onBeforeUnmount(clearDispatchSettling)
-
 // Cancel an in-flight dispatch transfer. Mirrors PrinterGridTile.cancelDispatch:
 // success is announced by the server's `jobSubmissionFailed` (cancelled: true)
 // socket event — which routes a toast through socketio.service — so we only
@@ -2732,6 +2692,49 @@ const currentFilamentSummary = computed<string | null>(() => {
 // ── Queue ──
 const queue = ref<QueuedJob[]>([])
 const queueLoading = ref(false)
+
+// After a transfer COMPLETES, the printer starts the print but the firmware
+// only reports PRINTING on its next poll (~5s). In that gap the transferred
+// job has already left the queue, so the next job surfaces as "next up" with
+// an enabled Send button — letting an operator dispatch a second file onto a
+// printer that's spinning up a print. Hold the button across that gap.
+//
+// We only settle when the transferring job LEFT the queue (a real print
+// start); if it rolled back to QUEUED (cancelled/failed) it's still in the
+// list, so there's nothing starting and no need to block. isPrinting clears
+// the lock as soon as it confirms; the timeout is just a safety fallback.
+// (Declared here, after `queue`, so the eager watches don't read it via
+// headIsTransferring before it's initialized.)
+const dispatchSettling = ref(false)
+let dispatchSettlingTimer: ReturnType<typeof setTimeout> | null = null
+let lastTransferringJobId: number | null = null
+function clearDispatchSettling() {
+  dispatchSettling.value = false
+  if (dispatchSettlingTimer) {
+    clearTimeout(dispatchSettlingTimer)
+    dispatchSettlingTimer = null
+  }
+}
+watch(headIsTransferring, (now, prev) => {
+  if (now) {
+    lastTransferringJobId = queue.value[0]?.id ?? null
+    clearDispatchSettling()
+  } else if (prev) {
+    const jobLeftQueue =
+      lastTransferringJobId != null && !queue.value.some((j) => j.id === lastTransferringJobId)
+    lastTransferringJobId = null
+    if (jobLeftQueue) {
+      dispatchSettling.value = true
+      if (dispatchSettlingTimer) clearTimeout(dispatchSettlingTimer)
+      dispatchSettlingTimer = setTimeout(() => clearDispatchSettling(), 15000)
+    }
+  }
+})
+watch(isPrinting, () => {
+  if (isPrinting.value) clearDispatchSettling()
+})
+onBeforeUnmount(clearDispatchSettling)
+
 async function loadQueue() {
   queueLoading.value = true
   try {
