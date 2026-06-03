@@ -417,7 +417,29 @@
            Two-column layout: Queue on the left, Storage source on the
            right (sub-tabbed Storage / Internal Storage). ========== -->
       <v-tabs-window-item value="overview">
-        <div class="pdv-content">
+        <!-- Printing is blocked while the printer is under maintenance — show
+             a clear notice instead of the queue/storage so nothing can be
+             queued or dispatched until the maintenance is ended. -->
+        <div v-if="isUnderMaintenance" class="pdv-content">
+          <v-alert type="warning" variant="tonal" icon="construction" class="pdv-maint-block">
+            <div class="font-weight-bold">Printer under maintenance</div>
+            <div class="text-body-2">
+              Printing is disabled while this printer is under maintenance.
+              Queueing and dispatch are blocked until you end the maintenance.
+            </div>
+            <v-btn
+              class="mt-3"
+              size="small"
+              variant="tonal"
+              color="warning"
+              prepend-icon="build"
+              @click="tab = 'maintenance'"
+            >
+              Go to Maintenance
+            </v-btn>
+          </v-alert>
+        </div>
+        <div v-else class="pdv-content">
           <v-row dense>
           <v-col cols="12" md="6">
           <!-- SECTION: Queue. "Next up" hero gets the visual weight,
@@ -1994,6 +2016,12 @@ const snackbar = useSnackbar()
 type TabName = 'overview' | 'history' | 'maintenance' | 'cameras' | 'settings'
 const TAB_NAMES: TabName[] = ['overview', 'history', 'maintenance', 'cameras', 'settings']
 const tab = ref<TabName>('overview')
+// Captured synchronously at setup so the under-maintenance auto-switch (below)
+// can defer to an explicit ?tab= in the URL instead of overriding it.
+const hadExplicitTab = (() => {
+  const t = new URLSearchParams(window.location.search).get('tab')
+  return !!(t && TAB_NAMES.includes(t as TabName))
+})()
 
 // Right column of the Print tab toggles between Storage (file-storage,
 // the default — what queueable files live in) and Internal Storage
@@ -2492,6 +2520,7 @@ watch([isPrinting, isPaused], () => {
 // refuse to send the next job while a print is already running/paused —
 // otherwise the button stays live mid-print and invites a double-dispatch.
 const sendToPrintDisabledReason = computed(() => {
+  if (isUnderMaintenance.value) return 'Printer is under maintenance'
   if (!isOnline.value) return 'Printer is offline'
   if (queueProcessingNext.value) return 'Sending…'
   if (queue.value[0]?.status === 'STARTING') return 'Transferring file…'
@@ -2582,6 +2611,18 @@ async function cancelTransfer() {
 }
 const isUnderMaintenance = computed(
   () => !printer.value?.enabled && !!printer.value?.disabledReason,
+)
+
+// Under maintenance the Print section is blocked, so default the view to the
+// Maintenance tab — and switch to it if maintenance starts while viewing.
+// Fires on first resolve (printer may load after mount) and on transitions.
+// An explicit ?tab= in the URL still wins on load.
+watch(
+  isUnderMaintenance,
+  (now) => {
+    if (now && !hadExplicitTab) tab.value = 'maintenance'
+  },
+  { immediate: true },
 )
 
 const printerAttention = computed(() =>
