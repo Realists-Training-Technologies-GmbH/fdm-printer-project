@@ -2908,7 +2908,7 @@ function matchesSearch(name: string): boolean {
   return name.toLowerCase().includes(filesSearch.value.toLowerCase())
 }
 type InternalSortKey = 'name' | 'date' | 'size'
-const internalSortBy = ref<InternalSortKey>('date')
+const internalSortBy = ref<InternalSortKey>('name')
 const internalSortOptions: Array<{ value: InternalSortKey; label: string; icon: string }> = [
   { value: 'date', label: 'Newest first', icon: 'event' },
   { value: 'name', label: 'Name (A→Z)', icon: 'sort_by_alpha' },
@@ -3141,7 +3141,7 @@ const storageSearch = ref('')
 const addingStorageId = ref<string | null>(null)
 
 type StorageSortKey = 'name' | 'date' | 'size' | 'time'
-const storageSortBy = ref<StorageSortKey>('date')
+const storageSortBy = ref<StorageSortKey>('name')
 const storageSortOptions: Array<{ value: StorageSortKey; label: string; icon: string }> = [
   { value: 'date', label: 'Newest first', icon: 'event' },
   { value: 'name', label: 'Name (A→Z)', icon: 'sort_by_alpha' },
