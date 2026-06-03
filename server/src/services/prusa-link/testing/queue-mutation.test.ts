@@ -88,3 +88,72 @@ describe("queue mutation aborts in-flight transfers (no surprise print on an unc
     expect((await repo().findOneBy({ fileName: "b.bgcode" }))?.status).toBe("PENDING");
   });
 });
+
+describe("requeueCancelledJobAtFront — manual cancel restarts the file in one click", () => {
+  let h: TrackingHarness;
+  beforeEach(async () => {
+    h = await createTrackingHarness();
+  });
+  afterEach(async () => {
+    await h.destroy();
+  });
+  const repo = () => h.dataSource.getRepository(PrintJob);
+
+  it("clones the cancelled job into a fresh QUEUED job at position 0, shifting the rest", async () => {
+    const queue = h.makePrintQueueService();
+    // An existing queued job currently sitting at the front.
+    const existing = await repo().save(
+      repo().create({
+        printerId: PRINTER_ID,
+        fileName: "existing.bgcode",
+        status: "QUEUED",
+        queuePosition: 0,
+        fileStorageId: "fs-existing",
+        metadata: null,
+      }),
+    );
+    // The just-cancelled print (out of the queue, in history).
+    const cancelled = await repo().save(
+      repo().create({
+        printerId: PRINTER_ID,
+        fileName: "cancelled.bgcode",
+        status: "CANCELLED",
+        queuePosition: null,
+        fileStorageId: "fs-cancelled",
+        fileFormat: "bgcode",
+        metadata: { layerHeight: 0.2 } as any,
+      }),
+    );
+
+    const newJob = await queue.requeueCancelledJobAtFront(cancelled);
+
+    expect(newJob).not.toBeNull();
+    expect(newJob!.id).not.toBe(cancelled.id); // a fresh row, not the cancelled one
+    expect(newJob!.status).toBe("QUEUED");
+    expect(newJob!.queuePosition).toBe(0); // at the front
+    expect(newJob!.fileStorageId).toBe("fs-cancelled"); // same file + metadata
+    expect(newJob!.fileName).toBe("cancelled.bgcode");
+
+    // The cancelled job stays in history untouched.
+    expect((await repo().findOneBy({ id: cancelled.id }))?.status).toBe("CANCELLED");
+    // The previously-front job got shifted down to make room.
+    expect((await repo().findOneBy({ id: existing.id }))?.queuePosition).toBe(1);
+  });
+
+  it("returns null when the cancelled job has no re-printable file reference", async () => {
+    const queue = h.makePrintQueueService();
+    const cancelled = await repo().save(
+      repo().create({
+        printerId: PRINTER_ID,
+        fileName: "manual.bgcode",
+        status: "CANCELLED",
+        queuePosition: null,
+        fileStorageId: null,
+        usbFilePath: null,
+        metadata: null,
+      }),
+    );
+
+    expect(await queue.requeueCancelledJobAtFront(cancelled)).toBeNull();
+  });
+});

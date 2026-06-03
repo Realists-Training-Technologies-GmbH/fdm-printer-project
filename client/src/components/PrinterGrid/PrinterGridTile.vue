@@ -77,17 +77,28 @@
         <div class="pg-tile__body">
           <div
             class="pg-tile__thumb"
-            :class="{ 'pg-tile__thumb--clickable': previewCanOpen }"
-            :title="previewCanOpen ? (thumbnail?.length ? 'View larger preview' : 'View print info') : undefined"
-            @click.stop.prevent="previewCanOpen && (previewOpen = true)"
+            :class="{ 'pg-tile__thumb--clickable': thumbClickable }"
+            :title="thumbTitle"
+            @click.stop.prevent="onThumbClick"
           >
+            <!-- While a file is streaming to the printer, show its preview
+                 (resolved from the upload-progress payload's fileStorageId).
+                 Gated on uploadProgress so the cached image doesn't linger
+                 once the transfer ends. -->
+            <v-img
+              v-if="uploadProgress && transferThumbnailUrl"
+              :src="transferThumbnailUrl"
+              :width="tileIconThumbnailSize"
+              :height="tileIconThumbnailSize"
+              cover
+            />
             <!-- Only paint the thumbnail when there's actually an
                  active print. The TanStack cache keeps the last
                  fetched preview around, so without this gate the tile
                  would still show the previous print's image after the
                  printer goes back to operational/idle. -->
             <v-img
-              v-if="isOnline && thumbnail?.length && (isPrinting || isPaused)"
+              v-else-if="isOnline && thumbnail?.length && (isPrinting || isPaused)"
               :src="'data:image/png;base64,' + (thumbnail ?? '')"
               :width="tileIconThumbnailSize"
               :height="tileIconThumbnailSize"
@@ -126,22 +137,24 @@
           <div class="pg-tile__info">
             <div
               class="pg-tile__filename text-truncate"
-              :title="currentPrintingFilePath ?? 'No file'"
+              :title="uploadProgress?.fileName ?? currentPrintingFilePath ?? 'No file'"
             >
-              {{ currentPrintingFilePath ?? 'No file' }}
+              {{ uploadProgress?.fileName ?? currentPrintingFilePath ?? 'No file' }}
             </div>
 
             <v-progress-linear
               v-if="uploadProgress"
-              :model-value="uploadProgress.percent"
-              :indeterminate="uploadProgress.percent === 0"
+              :model-value="uploadProgress.percent ?? 0"
+              :indeterminate="uploadProgress.percent == null"
               color="info"
               bg-color="rgba(255,255,255,0.08)"
               height="5"
               rounded
               striped
               class="pg-tile__progress"
-              :title="`Transferring · ${uploadProgress.percent}% · ${uploadProgress.fileName}`"
+              :title="uploadProgress.percent != null
+                ? `Transferring · ${uploadProgress.percent}% · ${uploadProgress.fileName}`
+                : `Transferring · ${uploadProgress.fileName}`"
             />
             <v-progress-linear
               v-else-if="currentProgress !== undefined"
@@ -181,7 +194,7 @@
               </v-tooltip>
 
               <span
-                v-if="uploadProgress"
+                v-if="uploadProgress && uploadProgress.percent != null"
                 class="pg-tile__percent"
                 title="Transferring file to printer"
               >
@@ -329,6 +342,8 @@ import { useIntervalFn } from '@vueuse/core'
 import { derivePrinterAttention } from '@/shared/printer-attention.util'
 import { notifyPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
+import { useDialog } from '@/shared/dialog.composable'
+import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { useRouter } from 'vue-router'
 import { PrintersService } from '@/backend'
 import { usePrinterStore } from '@/store/printer.store'
@@ -340,6 +355,7 @@ import { PrinterDto } from '@/models/printers/printer.model'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { PrintQueueService } from '@/backend/print-queue.service'
 import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
+import { useFileStorageThumbnailQuery } from '@/queries/file-storage-thumbnail.query'
 import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { useQueryClient } from '@tanstack/vue-query'
 import PrinterTilePreviewDialog from './PrinterTilePreviewDialog.vue'
@@ -400,6 +416,30 @@ const cancelInFlight = ref(false)
 const previewCanOpen = computed(
   () => !!thumbnail.value?.length || !!thumbnailRecord.value?.job?.metadata,
 )
+
+// Clicking the thumb opens the right preview for whatever the tile is
+// currently showing. During a transfer that's the file being streamed (via
+// the shared thumbnail viewer, keyed off the upload payload) — NOT the tile's
+// active-print preview, which would otherwise surface the previous print's
+// stale image/metadata.
+const jobThumbnailViewer = useDialog(DialogName.JobThumbnailViewer)
+const thumbIsTransfer = computed(() => !!uploadProgress.value && !!transferThumbnailUrl.value)
+const thumbClickable = computed(() => thumbIsTransfer.value || previewCanOpen.value)
+const thumbTitle = computed<string | undefined>(() => {
+  if (thumbIsTransfer.value) return 'View transferring file'
+  if (previewCanOpen.value) return thumbnail.value?.length ? 'View larger preview' : 'View print info'
+  return undefined
+})
+function onThumbClick() {
+  if (thumbIsTransfer.value && transferFileStorageId.value) {
+    jobThumbnailViewer.openDialog({
+      fileStorageId: transferFileStorageId.value,
+      thumbnails: transferThumbnails.value,
+    })
+    return
+  }
+  if (previewCanOpen.value) previewOpen.value = true
+}
 
 async function cancelDispatch() {
   if (!printerId.value || cancelInFlight.value) return
@@ -551,20 +591,37 @@ const currentProgress = computed(() => {
 //     starts appearing once the printer has acknowledged some data.
 // Prefer the firmware number when present; fall back to axios so the
 // initial moments (handshake, first packet) still show a non-zero bar.
-const uploadProgress = computed<{ percent: number; fileName: string } | null>(() => {
+const uploadProgress = computed<{ percent: number | null; fileName: string } | null>(() => {
   if (!printerId.value) return null
   const entry = printerStateStore.queueUploadsByPrinterId[printerId.value]
   if (!entry) return null
+  // Firmware transfer.progress only (bytes the printer has flushed to its
+  // storage). We deliberately do NOT fall back to axios bytes: over LAN the
+  // server hands the whole file to the kernel send buffer almost instantly,
+  // so axios races to 100% and then the slower-but-truthful firmware number
+  // resets the bar to ~1% and climbs — a jarring "100% → reset → 1…100".
+  // `percent` stays null until the firmware reports a real 0–1 value, so the
+  // bar renders indeterminate (a moving "streaming" animation) until then.
   const firmwareTransfer = (printerStateStore.printerEventsById[printerId.value]?.current?.payload as any)
     ?.transfer
-  const firmwarePct =
-    firmwareTransfer && typeof firmwareTransfer.progress === "number" && firmwareTransfer.progress >= 0
-      ? Math.round(firmwareTransfer.progress * 100)
-      : null
-  const axiosPct = entry.progress === null ? 0 : Math.round(entry.progress * 100)
-  const percent = firmwarePct !== null ? firmwarePct : axiosPct
+  const raw = firmwareTransfer?.progress
+  const percent = typeof raw === "number" && raw >= 0 && raw <= 1 ? Math.round(raw * 100) : null
   return { percent, fileName: entry.fileName }
 })
+
+// Thumbnail of the file being streamed, so the tile shows a preview during
+// the transfer (before the printer reports an active job). The fileStorageId
+// + thumbnail metadata ride along on the upload-progress payload; the image
+// itself is fetched lazily by the shared file-storage thumbnail query.
+const transferUploadEntry = computed(() =>
+  printerId.value ? printerStateStore.queueUploadsByPrinterId[printerId.value] : undefined,
+)
+const transferFileStorageId = computed(() => transferUploadEntry.value?.fileStorageId ?? null)
+const transferThumbnails = computed(() => transferUploadEntry.value?.thumbnails ?? [])
+const { data: transferThumbnailUrl } = useFileStorageThumbnailQuery(
+  transferFileStorageId,
+  transferThumbnails,
+)
 
 const timeRemainingSeconds = computed<number | null>(() => {
   if (!printerId.value) return null

@@ -27,6 +27,12 @@ export interface QueueUploadProgress {
   progress: number | null;
   loaded: number;
   total: number | null;
+  // File-Storage id + thumbnail metadata of the file being streamed, so the
+  // grid tile (which has no queue context) can render a thumbnail mid-upload
+  // exactly like the queue hero does. Only set for File-Storage dispatches;
+  // USB-file dispatches don't stream and never produce an upload entry.
+  fileStorageId: string | null;
+  thumbnails?: Array<{ index: number; width: number; height: number; format: string; size: number }>;
 }
 
 // Subfolder on the printer's own storage where File-Storage prints are uploaded.
@@ -66,6 +72,8 @@ export interface QueuedJob {
 
 export interface IPrintQueueService {
   addToQueue(printerId: number, jobId: number, position?: number): Promise<void>;
+
+  requeueCancelledJobAtFront(sourceJob: PrintJob): Promise<PrintJob | null>;
 
   removeFromQueue(jobId: number): Promise<void>;
 
@@ -200,6 +208,46 @@ export class PrintQueueService implements IPrintQueueService {
         position: job.queuePosition,
       });
     });
+  }
+
+  /**
+   * Re-queue the file from a just-cancelled print as a fresh QUEUED job at the
+   * FRONT of the printer's queue, so a manual "Cancel print" can be restarted
+   * with one click. The cancelled job is left untouched in history — we clone
+   * a new row from the same file + analysed metadata (compatibility was
+   * already proven: it was printing on this very printer a moment ago, so we
+   * skip the createJobFromFile validation gauntlet). Returns the new job, or
+   * null when the source carries no re-printable file reference.
+   */
+  async requeueCancelledJobAtFront(sourceJob: PrintJob): Promise<PrintJob | null> {
+    if (sourceJob.printerId == null) return null;
+    if (!sourceJob.fileStorageId && !sourceJob.usbFilePath) return null;
+
+    const clone = this.printJobRepository.create({
+      printerId: sourceJob.printerId,
+      printerName: sourceJob.printerName,
+      fileName: sourceJob.fileName,
+      fileStorageId: sourceJob.fileStorageId,
+      fileFormat: sourceJob.fileFormat,
+      fileSize: sourceJob.fileSize,
+      fileHash: sourceJob.fileHash,
+      usbFilePath: sourceJob.usbFilePath,
+      usbDisplayName: sourceJob.usbDisplayName,
+      analyzedAt: sourceJob.analyzedAt,
+      analysisState: sourceJob.analysisState,
+      metadata: sourceJob.metadata,
+      status: "PENDING",
+    });
+    const saved = await this.printJobRepository.save(clone);
+
+    // Position 0 = front; addToQueue shifts the rest down and flips it QUEUED.
+    await this.addToQueue(sourceJob.printerId, saved.id, 0);
+    this.logger.log(
+      `Re-queued cancelled job ${sourceJob.id} as ${saved.id} at the front of printer ${sourceJob.printerId}'s queue`,
+    );
+    // Re-read so the caller sees the post-addToQueue state (status QUEUED,
+    // queuePosition 0) rather than the stale pre-enqueue clone.
+    return this.printJobRepository.findOne({ where: { id: saved.id } });
   }
 
   async removeFromQueue(jobId: number): Promise<void> {
@@ -819,6 +867,23 @@ export class PrintQueueService implements IPrintQueueService {
       const fileSize = this.fileStorageService.getFileSize(job.fileStorageId);
       const fileStream = this.fileStorageService.readFileStream(job.fileStorageId);
 
+      // Thumbnail metadata for the transfer bar's preview. Derived once here
+      // (not per progress tick) from the job's analysed metadata, same shape
+      // and source as getQueue() so the grid tile renders an identical
+      // thumbnail mid-upload. The image bytes are still fetched lazily by the
+      // client's thumbnail query — this is just the small index/size metadata.
+      const uploadMd = (job.metadata as any) ?? {};
+      const uploadThumbnails = Array.isArray(uploadMd._thumbnails)
+        ? uploadMd._thumbnails.map((t: any) => ({
+            index: t.index,
+            width: t.width,
+            height: t.height,
+            format: t.format,
+            size: t.size,
+          }))
+        : undefined;
+      const uploadFileStorageId = job.fileStorageId;
+
       // Generate a per-dispatch correlation token. PrusaLinkApi emits
       // `upload.progress.${token}` events with axios's progress payload
       // each time bytes flush; we mirror that into the per-printer map so
@@ -833,6 +898,8 @@ export class PrintQueueService implements IPrintQueueService {
           progress: event.progress ?? null,
           loaded: event.loaded,
           total: event.total ?? null,
+          fileStorageId: uploadFileStorageId,
+          thumbnails: uploadThumbnails,
         });
       };
       this.eventEmitter2.on(uploadProgressEvent(uploadToken), onProgress);
