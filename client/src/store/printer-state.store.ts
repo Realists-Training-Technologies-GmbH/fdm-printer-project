@@ -6,6 +6,7 @@ import {
 } from '@/models/socketio-messages/socketio-message.model'
 import { usePrinterStore } from './printer.store'
 import { PrinterRemoteFileService } from '@/backend'
+import { ThumbnailInfo } from '@/backend/file-storage.service'
 import { useSettingsStore } from './settings.store'
 import { CurrentOrHistoryPayload } from '@/models/printers/printer-current-job.model'
 import {
@@ -21,6 +22,13 @@ export interface QueueUploadProgress {
   progress: number | null
   loaded: number
   total: number | null
+  /**
+   * File-Storage id + thumbnail metadata of the file being streamed, so the
+   * grid tile can render a thumbnail mid-upload without any queue context.
+   * Only present for File-Storage dispatches (USB dispatches don't stream).
+   */
+  fileStorageId?: string | null
+  thumbnails?: ThumbnailInfo[]
 }
 
 interface State {

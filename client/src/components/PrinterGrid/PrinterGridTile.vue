@@ -81,13 +81,24 @@
             :title="previewCanOpen ? (thumbnail?.length ? 'View larger preview' : 'View print info') : undefined"
             @click.stop.prevent="previewCanOpen && (previewOpen = true)"
           >
+            <!-- While a file is streaming to the printer, show its preview
+                 (resolved from the upload-progress payload's fileStorageId).
+                 Gated on uploadProgress so the cached image doesn't linger
+                 once the transfer ends. -->
+            <v-img
+              v-if="uploadProgress && transferThumbnailUrl"
+              :src="transferThumbnailUrl"
+              :width="tileIconThumbnailSize"
+              :height="tileIconThumbnailSize"
+              cover
+            />
             <!-- Only paint the thumbnail when there's actually an
                  active print. The TanStack cache keeps the last
                  fetched preview around, so without this gate the tile
                  would still show the previous print's image after the
                  printer goes back to operational/idle. -->
             <v-img
-              v-if="isOnline && thumbnail?.length && (isPrinting || isPaused)"
+              v-else-if="isOnline && thumbnail?.length && (isPrinting || isPaused)"
               :src="'data:image/png;base64,' + (thumbnail ?? '')"
               :width="tileIconThumbnailSize"
               :height="tileIconThumbnailSize"
@@ -342,6 +353,7 @@ import { PrinterDto } from '@/models/printers/printer.model'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { PrintQueueService } from '@/backend/print-queue.service'
 import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
+import { useFileStorageThumbnailQuery } from '@/queries/file-storage-thumbnail.query'
 import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { useQueryClient } from '@tanstack/vue-query'
 import PrinterTilePreviewDialog from './PrinterTilePreviewDialog.vue'
@@ -570,6 +582,20 @@ const uploadProgress = computed<{ percent: number | null; fileName: string } | n
   const percent = typeof raw === "number" && raw >= 0 && raw <= 1 ? Math.round(raw * 100) : null
   return { percent, fileName: entry.fileName }
 })
+
+// Thumbnail of the file being streamed, so the tile shows a preview during
+// the transfer (before the printer reports an active job). The fileStorageId
+// + thumbnail metadata ride along on the upload-progress payload; the image
+// itself is fetched lazily by the shared file-storage thumbnail query.
+const transferUploadEntry = computed(() =>
+  printerId.value ? printerStateStore.queueUploadsByPrinterId[printerId.value] : undefined,
+)
+const transferFileStorageId = computed(() => transferUploadEntry.value?.fileStorageId ?? null)
+const transferThumbnails = computed(() => transferUploadEntry.value?.thumbnails ?? [])
+const { data: transferThumbnailUrl } = useFileStorageThumbnailQuery(
+  transferFileStorageId,
+  transferThumbnails,
+)
 
 const timeRemainingSeconds = computed<number | null>(() => {
   if (!printerId.value) return null

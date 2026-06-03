@@ -27,6 +27,12 @@ export interface QueueUploadProgress {
   progress: number | null;
   loaded: number;
   total: number | null;
+  // File-Storage id + thumbnail metadata of the file being streamed, so the
+  // grid tile (which has no queue context) can render a thumbnail mid-upload
+  // exactly like the queue hero does. Only set for File-Storage dispatches;
+  // USB-file dispatches don't stream and never produce an upload entry.
+  fileStorageId: string | null;
+  thumbnails?: Array<{ index: number; width: number; height: number; format: string; size: number }>;
 }
 
 // Subfolder on the printer's own storage where File-Storage prints are uploaded.
@@ -819,6 +825,23 @@ export class PrintQueueService implements IPrintQueueService {
       const fileSize = this.fileStorageService.getFileSize(job.fileStorageId);
       const fileStream = this.fileStorageService.readFileStream(job.fileStorageId);
 
+      // Thumbnail metadata for the transfer bar's preview. Derived once here
+      // (not per progress tick) from the job's analysed metadata, same shape
+      // and source as getQueue() so the grid tile renders an identical
+      // thumbnail mid-upload. The image bytes are still fetched lazily by the
+      // client's thumbnail query — this is just the small index/size metadata.
+      const uploadMd = (job.metadata as any) ?? {};
+      const uploadThumbnails = Array.isArray(uploadMd._thumbnails)
+        ? uploadMd._thumbnails.map((t: any) => ({
+            index: t.index,
+            width: t.width,
+            height: t.height,
+            format: t.format,
+            size: t.size,
+          }))
+        : undefined;
+      const uploadFileStorageId = job.fileStorageId;
+
       // Generate a per-dispatch correlation token. PrusaLinkApi emits
       // `upload.progress.${token}` events with axios's progress payload
       // each time bytes flush; we mirror that into the per-printer map so
@@ -833,6 +856,8 @@ export class PrintQueueService implements IPrintQueueService {
           progress: event.progress ?? null,
           loaded: event.loaded,
           total: event.total ?? null,
+          fileStorageId: uploadFileStorageId,
+          thumbnails: uploadThumbnails,
         });
       };
       this.eventEmitter2.on(uploadProgressEvent(uploadToken), onProgress);
