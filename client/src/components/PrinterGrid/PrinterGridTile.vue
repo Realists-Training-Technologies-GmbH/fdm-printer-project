@@ -228,17 +228,37 @@
                 · {{ timeRemainingFormatted }}<template v-if="etaClockFormatted"> · {{ etaClockFormatted }}</template>
               </span>
 
-              <v-tooltip
+              <v-menu
                 v-if="queueCount > 0"
-                location="top"
-                :text="`${queueCount} job${queueCount === 1 ? '' : 's'} queued`"
+                location="top start"
+                :close-on-content-click="false"
               >
                 <template #activator="{ props: qp }">
-                  <span v-bind="qp" class="pg-tile__queue">
+                  <span
+                    v-bind="qp"
+                    class="pg-tile__queue"
+                    title="Show queue"
+                    @click.stop
+                  >
                     <v-icon size="12">format_list_bulleted</v-icon> {{ queueCount }}
                   </span>
                 </template>
-              </v-tooltip>
+                <v-card class="pg-tile__queue-pop" min-width="220" max-width="340">
+                  <div class="pg-tile__queue-pop-head">
+                    Queue · {{ queueCount }} job{{ queueCount === 1 ? '' : 's' }}
+                  </div>
+                  <v-list density="compact" class="pg-tile__queue-list" lines="one">
+                    <v-list-item v-for="(job, i) in queueJobs" :key="job.jobId">
+                      <template #prepend>
+                        <span class="pg-tile__queue-pos">{{ i + 1 }}</span>
+                      </template>
+                      <v-list-item-title :title="job.fileName" class="text-truncate">
+                        {{ job.fileName }}
+                      </v-list-item-title>
+                    </v-list-item>
+                  </v-list>
+                </v-card>
+              </v-menu>
 
               <v-spacer />
 
@@ -396,11 +416,12 @@ const router = useRouter()
 
 const printerId = computed(() => props.printer?.id)
 
-// How many jobs are queued for this printer (from the shared global-queue
-// query) — surfaced on the tile so the operator can see a printer has work
-// lined up without opening its detail view.
-const { countsByPrinterId } = usePrinterQueueCounts()
-const queueCount = computed(() => (printerId.value ? countsByPrinterId.value[printerId.value] ?? 0 : 0))
+// The jobs queued for this printer (from the shared global-queue query) —
+// surfaced on the tile so the operator can see a printer's line-up without
+// opening its detail view. The chip opens a popover listing the actual files.
+const { jobsByPrinterId } = usePrinterQueueCounts()
+const queueJobs = computed(() => (printerId.value ? jobsByPrinterId.value[printerId.value] ?? [] : []))
+const queueCount = computed(() => queueJobs.value.length)
 
 const isFirstTile = computed(() => props.x === 0 && props.y === 0)
 const noPrintersExist = computed(() => printerStore.printers.length === 0)
@@ -1042,7 +1063,34 @@ const clickConnectUsb = async () => {
   font-weight: 600;
   color: rgba(var(--v-theme-on-surface), 0.72);
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
+}
+.pg-tile__queue:hover {
+  color: rgb(var(--v-theme-on-surface));
+}
+.pg-tile__queue-pop-head {
+  padding: 8px 12px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+}
+.pg-tile__queue-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding-top: 0;
+}
+.pg-tile__queue-pos {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(var(--v-theme-on-surface), 0.08);
+  color: rgba(var(--v-theme-on-surface), 0.8);
 }
 
 .pg-tile__temp {
