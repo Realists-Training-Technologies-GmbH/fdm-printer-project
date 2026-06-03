@@ -17,7 +17,7 @@ import { getIncompatibilityReason } from "@/utils/printer-compatibility.util";
 import { PrusaLinkType, type PrinterType } from "@/services/printer-api.interface";
 import { PrinterFirmwareCache } from "@/state/printer-firmware.cache";
 import { arePrusaModelsCompatible } from "@/services/prusa-link/utils/prusa-link-model.util";
-import type { FileFormatType } from "@/entities/print-job.entity";
+import type { FileFormatType, PrintJob } from "@/entities/print-job.entity";
 import { BadRequestException, NotFoundException } from "@/exceptions/runtime.exceptions";
 import { getMediaPath } from "@/utils/fs.utils";
 import { intakeEvents } from "@/constants/event.constants";
@@ -78,6 +78,24 @@ export class IntakeService {
     this.logger = loggerFactory(IntakeService.name);
     this.repository = typeormService.getDataSource().getRepository(IntakeItem);
     this.stagingPath = join(getMediaPath(), "intake");
+  }
+
+  // Per-item async mutex. `getPendingOrThrow` + the resolving operation span
+  // await points with no DB-level claim, so a double-clicked button or two
+  // operators could both pass the PENDING check and double-promote / double-
+  // queue one item. Serializing per id makes the loser see the now-resolved
+  // status and fail cleanly via `getPendingOrThrow`.
+  private readonly itemLocks = new Map<number, Promise<unknown>>();
+
+  private withItemLock<T>(id: number, fn: () => Promise<T>): Promise<T> {
+    const prev = this.itemLocks.get(id) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.itemLocks.set(id, tail);
+    void tail.finally(() => {
+      if (this.itemLocks.get(id) === tail) this.itemLocks.delete(id);
+    });
+    return run;
   }
 
   async ensureStagingDir(): Promise<void> {
@@ -264,6 +282,15 @@ export class IntakeService {
     userId: number | null,
     username: string,
   ): Promise<{ fileStorageId: string }> {
+    return this.withItemLock(id, () => this.archiveInner(id, folderPath, userId, username));
+  }
+
+  private async archiveInner(
+    id: number,
+    folderPath: string | null,
+    userId: number | null,
+    username: string,
+  ): Promise<{ fileStorageId: string }> {
     const item = await this.getPendingOrThrow(id);
     const fileStorageId = await this.promoteToFileStorage(item, folderPath);
     await this.markResolved(item, "ARCHIVED", userId, username);
@@ -278,6 +305,15 @@ export class IntakeService {
    * delegate queueing to the same job-creation flow.
    */
   async dispatch(
+    id: number,
+    args: { folderPath: string | null; printerId: number },
+    userId: number | null,
+    username: string,
+  ): Promise<{ fileStorageId: string; printerId: number; jobId: number }> {
+    return this.withItemLock(id, () => this.dispatchInner(id, args, userId, username));
+  }
+
+  private async dispatchInner(
     id: number,
     args: { folderPath: string | null; printerId: number },
     userId: number | null,
@@ -320,7 +356,17 @@ export class IntakeService {
       }
     }
 
-    const fileStorageId = await this.promoteToFileStorage(item, args.folderPath);
+    // Promote idempotently. `promoteToFileStorage` *moves* (renames) the staged
+    // bytes into File Storage — irreversible. If a later step here throws, the
+    // item is still PENDING but the staging file is gone, so a naive retry would
+    // fail "no staged file to promote" forever. Record the promoted id on the
+    // item immediately so a retry reuses it instead of re-promoting.
+    let fileStorageId = (item.metadata as any)?._promotedFileStorageId as string | undefined;
+    if (!fileStorageId) {
+      fileStorageId = await this.promoteToFileStorage(item, args.folderPath);
+      item.metadata = { ...((item.metadata as any) ?? {}), _promotedFileStorageId: fileStorageId };
+      await this.repository.save(item);
+    }
 
     // Use the metadata that File Storage just persisted, not item.metadata:
     // promotion rewrites `_thumbnails` from inline base64 (analysis output) to
@@ -328,16 +374,29 @@ export class IntakeService {
     // endpoint reads back. The intake copy still has the base64 form, which
     // the thumbnail-by-index endpoint can't serve — so the card showed blank.
     const metadata = (await this.fileStorageService.loadMetadata(fileStorageId)) ?? (item.metadata as any) ?? {};
-    const job = await this.printJobService.createPendingJob(printerId, item.originalFileName, metadata, printer.name);
-    job.fileStorageId = fileStorageId;
-    job.fileHash = item.fileHash ?? metadata._fileHash ?? null;
-    job.analysisState = "ANALYZED";
-    job.analyzedAt = new Date();
-    if (item.fileFormat) {
-      job.fileFormat = item.fileFormat;
+    let job: PrintJob | undefined;
+    try {
+      job = await this.printJobService.createPendingJob(printerId, item.originalFileName, metadata, printer.name);
+      job.fileStorageId = fileStorageId;
+      job.fileHash = item.fileHash ?? metadata._fileHash ?? null;
+      job.analysisState = "ANALYZED";
+      job.analyzedAt = new Date();
+      if (item.fileFormat) {
+        job.fileFormat = item.fileFormat;
+      }
+      await this.printJobService.updateJob(job);
+      await this.printQueueService.addToQueue(printerId, job.id);
+    } catch (error) {
+      // A DB write or addToQueue (which re-checks maintenance) failed *after*
+      // promotion. Delete the orphan job so a retry doesn't leave a duplicate;
+      // the promoted file is kept and reused via the marker above.
+      if (job?.id) {
+        await this.printJobService
+          .deleteJob(job)
+          .catch((err) => this.logger.warn(`Failed to clean up orphan job ${job!.id} after dispatch error: ${err}`));
+      }
+      throw error;
     }
-    await this.printJobService.updateJob(job);
-    await this.printQueueService.addToQueue(printerId, job.id);
 
     await this.markResolved(item, "DISPATCHED", userId, username);
     this.logger.log(`Intake item ${id} dispatched to printer ${printerId} (job ${job.id})`);
@@ -346,6 +405,10 @@ export class IntakeService {
 
   /** Throw away the staged bytes and mark the item discarded. */
   async discard(id: number, userId: number | null, username: string): Promise<void> {
+    return this.withItemLock(id, () => this.discardInner(id, userId, username));
+  }
+
+  private async discardInner(id: number, userId: number | null, username: string): Promise<void> {
     const item = await this.getPendingOrThrow(id);
     if (item.stagingPath && existsSync(item.stagingPath)) {
       try {

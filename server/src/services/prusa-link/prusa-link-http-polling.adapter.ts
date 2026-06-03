@@ -11,6 +11,7 @@ import { API_STATE, ApiState } from "@/shared/dtos/api-state.type";
 import { errorSummary } from "@/utils/error.utils";
 import { prusaLinkEvent } from "@/services/prusa-link/constants/prusalink.constants";
 import type { PrusaLinkEventDto } from "@/services/prusa-link/constants/prusalink-event.dto";
+import { normalizePrusaLinkPoll } from "@/services/prusa-link/utils/normalize-poll";
 import { WsMessage } from "@/shared/ws-message.constants";
 import { AppConstants } from "@/server.constants";
 
@@ -155,112 +156,11 @@ export class PrusaLinkHttpPollingAdapter implements IWebsocketAdapter {
       this.updateApiState(API_STATE.responding);
       this.consecutiveFailures = 0;
 
-      // Native/Buddy PrusaLink (XL, MK4, …) does NOT emit `link_state` on
-      // /api/printer — it carries the live state on /api/v1/status instead.
-      // The legacy Einsy shim (MK3/MK2.5) emits `link_state`. Fall back to the
-      // v1 status state so the flag mapping below works on every firmware;
-      // without this the XL's flags get clobbered to all-false (e.g.
-      // ready:false while idle, printing:false mid-print).
-      const linkState = printerState.state?.flags?.link_state ?? status?.printer?.state;
-      const attentionMessage = status?.printer?.status_printer?.message;
-      if (linkState && linkState !== "PRINTING") {
-        // When the printer is in ATTENTION, surface the firmware's reason
-        // ("Filament runout", "Heating error", etc.) instead of the bare
-        // state label so the dashboard tells the user what to fix.
-        if (linkState.toUpperCase() === "ATTENTION" && attentionMessage) {
-          printerState.state.text = `ATTENTION: ${attentionMessage}`;
-        } else {
-          printerState.state.text = linkState;
-        }
-      }
-
-      // Map PrusaLink's link_state to the boolean flag set the dashboard reads.
-      // The previous "operational = !error" shortcut hid genuine BUSY/ATTENTION
-      // states; we'd rather show what the printer actually reports.
-      const flags = printerState.state?.flags;
-      if (flags) {
-        const ls = (linkState ?? "").toUpperCase();
-        flags.operational = ls !== "ERROR";
-        // ATTENTION still has a job loaded and "running" from the firmware's
-        // perspective — keep `printing: true` so the dashboard shows the
-        // pause/cancel controls instead of hiding them as if no job was
-        // active. The `error: true` flag below tells the UI to still surface
-        // the attention banner.
-        flags.printing = ls === "PRINTING" || ls === "ATTENTION";
-        flags.paused = ls === "PAUSED";
-        flags.pausing = ls === "PAUSING";
-        flags.cancelling = ls === "STOPPED" || ls === "CANCELLING";
-        flags.error = ls === "ERROR" || ls === "ATTENTION";
-        flags.closedOnError = ls === "ERROR";
-        flags.ready = ls === "READY" || ls === "IDLE" || ls === "OPERATIONAL" || ls === "FINISHED";
-        flags.busy = ls === "BUSY";
-      }
-
-      // Avoid `undefined * 100 = NaN` propagating to the dashboard.
-      const rawCompletion = jobState.progress?.completion;
-      const completion = typeof rawCompletion === "number" ? rawCompletion * 100 : null;
-
-      // Extra telemetry from /api/v1/status — z height, fans, axis positions,
-      // and an in-flight transfer indicator (handy while a print file is
-      // streaming up to the printer).
-      const richTelemetry = status?.printer
-        ? {
-            zHeight: (status.printer as any).axis_z ?? null,
-            fanHotend: status.printer.fan_hotend ?? null,
-            fanPrint: status.printer.fan_print ?? null,
-            speed: status.printer.speed ?? null,
-            flow: status.printer.flow ?? null,
-          }
-        : null;
-      const transfer = status?.transfer
-        ? {
-            id: status.transfer.id,
-            progress: status.transfer.progress,
-            bytes: status.transfer.data_transferred,
-            timeTransferring: status.transfer.time_transferring,
-          }
-        : null;
-      // `storage` is a single object on Buddy firmware but an array on the
-      // Einsy shim (MK3/MK2.5). Report the writable storage's free space
-      // (where uploads/prints land), falling back to the first reported one.
-      const storageList = Array.isArray(status?.storage) ? status.storage : status?.storage ? [status.storage] : [];
-      const freeSpace = (storageList.find((s) => !s.read_only) ?? storageList[0])?.free_space ?? null;
-      // Carry the firmware's own status text alongside the link_state mapping
-      // so the frontend can show a tooltip with the printer's exact reason
-      // for the current state (especially during ATTENTION).
-      const printerMessage = status?.printer?.status_printer?.message ?? null;
-
-      // The rest of the system (PrinterControlDialog, attention helper,
-      // tile temperature overlay) expects an OctoPrint-style `temps`
-      // array. PrusaLink only sends a single-snapshot `temperature`
-      // object; mirror it into a one-element array so consumers stay
-      // adapter-agnostic.
-      const temperature = (printerState as any)?.temperature;
-      const tempsArray =
-        temperature?.tool0 || temperature?.bed
-          ? [
-              {
-                time: Math.floor(Date.now() / 1000),
-                tool0: temperature?.tool0,
-                bed: temperature?.bed,
-              },
-            ]
-          : (printerState as any)?.temps;
-
-      await this.emitEvent("current", {
-        ...printerState,
-        temps: tempsArray,
-        job: jobState.job,
-        progress: {
-          printTime: jobState.progress?.printTime ?? null,
-          printTimeLeft: jobState.progress?.printTimeLeft ?? null,
-          completion,
-        },
-        telemetry: richTelemetry ?? (printerState as any).telemetry ?? null,
-        transfer,
-        freeSpace,
-        printerMessage,
-      });
+      // Normalize the three reads into the `current` event payload. Extracted
+      // to a pure function (normalize-poll.ts) so the firmware simulator and
+      // unit tests can exercise the exact same mapping without HTTP/digest.
+      const payload = normalizePrusaLinkPoll(printerState, jobState, status);
+      await this.emitEvent("current", payload);
     } catch (error) {
       this.updateSocketState(SOCKET_STATE.error);
 

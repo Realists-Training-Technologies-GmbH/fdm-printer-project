@@ -11,6 +11,7 @@ import { PrinterSocketStore } from "@/state/printer-socket.store";
 import { SOCKET_STATE } from "@/shared/dtos/socket-state.type";
 import { API_STATE } from "@/shared/dtos/api-state.type";
 import { PrinterMaintenanceLogService } from "@/services/orm/printer-maintenance-log.service";
+import { PrinterEventsCache } from "@/state/printer-events.cache";
 import { BadRequestException } from "@/exceptions/runtime.exceptions";
 import { uploadProgressEvent } from "@/constants/event.constants";
 import { v4 as uuidv4 } from "uuid";
@@ -111,6 +112,15 @@ export class PrintQueueService implements IPrintQueueService {
   // aborted, so a stale controller can't accidentally cancel the *next*
   // job dispatched to the same printer.
   private readonly dispatchAbortersByPrinterId = new Map<number, AbortController>();
+  // Per-printer async mutex serializing the dispatch claim (pick next job →
+  // ensurePrinterIdle → flip to STARTING). Node is single-threaded but these
+  // steps span `await` points, so two concurrent processQueue/submitToPrinter
+  // calls for the same printer could both pass the idle check before either
+  // wrote STARTING — double-uploading to one printer and clobbering the single
+  // per-printer AbortController. The lock makes the claim atomic per printer.
+  // The long upload runs OUTSIDE the lock (dispatchInBackground is fire-and-
+  // forget), so the queue isn't blocked for the duration of the transfer.
+  private readonly dispatchLockByPrinterId = new Map<number, Promise<unknown>>();
 
   constructor(
     loggerFactory: ILoggerFactory,
@@ -120,27 +130,20 @@ export class PrintQueueService implements IPrintQueueService {
     private readonly fileStorageService: FileStorageService,
     private readonly printerSocketStore: PrinterSocketStore,
     private readonly printerMaintenanceLogService: PrinterMaintenanceLogService,
+    private readonly printerEventsCache: PrinterEventsCache,
   ) {
     this.printJobRepository = typeormService.getDataSource().getRepository(PrintJob);
     this.printerRepository = typeormService.getDataSource().getRepository(Printer);
     this.eventEmitter2 = eventEmitter2;
     this.logger = loggerFactory(PrintQueueService.name);
 
-    // Auto-advance the queue: when the active job reaches a terminal state, try
-    // to dispatch the next queued job. Best-effort — the printer might be
-    // offline or there may be nothing queued, so failures are only logged.
-    const advance = (event: { printerId?: number }) => {
-      const printerId = event?.printerId;
-      if (!printerId) return;
-      this.processQueue(printerId).catch((error) => {
-        this.logger.debug(
-          `Queue auto-advance skipped for printer ${printerId}: ${error instanceof Error ? error.message : error}`,
-        );
-      });
-    };
-    this.eventEmitter2.on("printJob.completed", advance);
-    this.eventEmitter2.on("printJob.failed", advance);
-    this.eventEmitter2.on("printJob.cancelled", advance);
+    // NO auto-advance. Dispatching the next queued job is a deliberate MANUAL
+    // action (`POST /print-queue/:printerId/process` → processQueue). On an FDM
+    // farm without automatic part ejection, an operator must physically remove
+    // the finished part and clear the bed before the next print — starting it
+    // automatically would print into the previous part (nozzle/bed crash, ruined
+    // job). So completing/failing/cancelling a print does NOT trigger the next;
+    // the operator clears the bed, then presses "process next".
   }
 
   private isPrinterConnected(printerId: number): { connected: boolean; reason?: string } {
@@ -165,30 +168,37 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async addToQueue(printerId: number, jobId: number, position?: number): Promise<void> {
-    const job = await this.printJobRepository.findOne({ where: { id: jobId } });
-    if (!job) {
-      throw new Error(`Print job ${jobId} not found`);
-    }
+    // Serialize per printer: `getMaxQueuePosition` + `+1` is a read-modify-write,
+    // so two concurrent adds (e.g. two intake dispatches) could both read the
+    // same max and assign the same queuePosition. The lock makes position
+    // assignment atomic per printer (shared with the dispatch claim, so an add
+    // can't interleave a dispatch's queue read either).
+    await this.withPrinterLock(printerId, async () => {
+      const job = await this.printJobRepository.findOne({ where: { id: jobId } });
+      if (!job) {
+        throw new Error(`Print job ${jobId} not found`);
+      }
 
-    this.ensurePrinterAssignment(job, printerId);
-    await this.ensurePrinterNotInMaintenance(printerId);
+      this.ensurePrinterAssignment(job, printerId);
+      await this.ensurePrinterNotInMaintenance(printerId);
 
-    if (position === undefined || position === null) {
-      const maxPosition = await this.getMaxQueuePosition(printerId);
-      job.queuePosition = (maxPosition ?? -1) + 1;
-    } else {
-      await this.shiftQueuePositions(printerId, position);
-      job.queuePosition = position;
-    }
+      if (position === undefined || position === null) {
+        const maxPosition = await this.getMaxQueuePosition(printerId);
+        job.queuePosition = (maxPosition ?? -1) + 1;
+      } else {
+        await this.shiftQueuePositions(printerId, position);
+        job.queuePosition = position;
+      }
 
-    job.status = "QUEUED";
-    await this.printJobRepository.save(job);
+      job.status = "QUEUED";
+      await this.printJobRepository.save(job);
 
-    this.logger.log(`Added job ${jobId} to printer ${printerId} queue at position ${job.queuePosition}`);
-    this.eventEmitter2.emit("printQueue.jobAdded", {
-      printerId,
-      jobId,
-      position: job.queuePosition,
+      this.logger.log(`Added job ${jobId} to printer ${printerId} queue at position ${job.queuePosition}`);
+      this.eventEmitter2.emit("printQueue.jobAdded", {
+        printerId,
+        jobId,
+        position: job.queuePosition,
+      });
     });
   }
 
@@ -200,6 +210,14 @@ export class PrintQueueService implements IPrintQueueService {
 
     const printerId = job.printerId;
     const oldPosition = job.queuePosition;
+
+    // If the job is mid-upload, abort the in-flight transfer first — otherwise
+    // "remove" only drops the queue position while the upload finishes and the
+    // print starts anyway on a bed the operator wanted cleared. The background
+    // dispatcher then rolls the aborted job back off STARTING.
+    if (job.status === "STARTING" && printerId) {
+      this.cancelDispatch(printerId);
+    }
 
     job.queuePosition = null;
     if (job.status === "QUEUED") {
@@ -295,16 +313,20 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async reorderQueue(printerId: number, jobIds: number[]): Promise<void> {
-    for (let i = 0; i < jobIds.length; i++) {
-      const job = await this.printJobRepository.findOne({ where: { id: jobIds[i] } });
-      if (job?.printerId === printerId) {
-        job.queuePosition = i;
-        await this.printJobRepository.save(job);
+    // Same per-printer lock: rewriting positions must not interleave with a
+    // concurrent addToQueue (which reads the max) or another reorder.
+    await this.withPrinterLock(printerId, async () => {
+      for (let i = 0; i < jobIds.length; i++) {
+        const job = await this.printJobRepository.findOne({ where: { id: jobIds[i] } });
+        if (job?.printerId === printerId) {
+          job.queuePosition = i;
+          await this.printJobRepository.save(job);
+        }
       }
-    }
 
-    this.logger.log(`Reordered queue for printer ${printerId}`);
-    this.eventEmitter2.emit("printQueue.reordered", { printerId });
+      this.logger.log(`Reordered queue for printer ${printerId}`);
+      this.eventEmitter2.emit("printQueue.reordered", { printerId });
+    });
   }
 
   /**
@@ -313,7 +335,7 @@ export class PrintQueueService implements IPrintQueueService {
    * A STARTING job represents an upload that was in flight when the server
    * stopped. The actual TCP upload died with the process, so the printer
    * never received the full file. Roll these back to QUEUED with a clear
-   * statusReason so the user (or queue auto-advance) can retry.
+   * statusReason so the operator can retry via "process next".
    *
    * queuePosition is left intact so the job keeps its slot.
    */
@@ -347,6 +369,10 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async clearQueue(printerId: number): Promise<void> {
+    // Abort any in-flight transfer so clearing the queue also stops a print that
+    // was mid-upload (it would otherwise start anyway). No-op if none running.
+    this.cancelDispatch(printerId);
+
     const jobs = await this.printJobRepository.find({
       where: {
         printerId,
@@ -364,32 +390,59 @@ export class PrintQueueService implements IPrintQueueService {
     this.eventEmitter2.emit("printQueue.cleared", { printerId });
   }
 
+  /**
+   * Serialize `fn` against any other dispatch claim for the same printer.
+   * Promise-chain mutex: each caller waits for the previous holder to settle
+   * (errors swallowed for the *chain* so one failure doesn't wedge the printer;
+   * the real result/rejection still propagates to this caller). The map entry
+   * is cleared once this is the last in line.
+   */
+  private withPrinterLock<T>(printerId: number, fn: () => Promise<T>): Promise<T> {
+    const prev = this.dispatchLockByPrinterId.get(printerId) ?? Promise.resolve();
+    // Run fn whether the previous holder resolved or rejected.
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.dispatchLockByPrinterId.set(printerId, tail);
+    void tail.finally(() => {
+      if (this.dispatchLockByPrinterId.get(printerId) === tail) {
+        this.dispatchLockByPrinterId.delete(printerId);
+      }
+    });
+    return run;
+  }
+
   async processQueue(printerId: number): Promise<PrintJob | null> {
-    const nextJob = await this.getNextInQueue(printerId);
+    // Hold the per-printer lock across pick-next → connectivity → claim so a
+    // concurrent processQueue/submitToPrinter can't slip a second dispatch
+    // through the idle check. Calls submitToPrinterInner (already locked) to
+    // avoid re-entrant deadlock on the same lock.
+    return this.withPrinterLock(printerId, async () => {
+      const nextJob = await this.getNextInQueue(printerId);
 
-    if (!nextJob) {
-      this.logger.log(`No jobs in queue for printer ${printerId}`);
-      return null;
-    }
+      if (!nextJob) {
+        this.logger.log(`No jobs in queue for printer ${printerId}`);
+        return null;
+      }
 
-    // Refuse to submit when the printer isn't actually reachable — the
-    // submission would fail mid-upload and flip the job to FAILED, forcing the
-    // user to requeue. Better to leave the job in queue and surface the reason.
-    const connectivity = this.isPrinterConnected(printerId);
-    if (!connectivity.connected) {
-      throw new BadRequestException(
-        `Cannot process queue: printer ${printerId} is not ready. ${connectivity.reason ?? ""}`.trim(),
-      );
-    }
+      // Refuse to submit when the printer isn't actually reachable — the
+      // submission would fail mid-upload and flip the job to FAILED, forcing the
+      // user to requeue. Better to leave the job in queue and surface the reason.
+      const connectivity = this.isPrinterConnected(printerId);
+      if (!connectivity.connected) {
+        throw new BadRequestException(
+          `Cannot process queue: printer ${printerId} is not ready. ${connectivity.reason ?? ""}`.trim(),
+        );
+      }
 
-    this.logger.log(`Processing queue: next job is ${nextJob.id} (${nextJob.fileName})`);
+      this.logger.log(`Processing queue: next job is ${nextJob.id} (${nextJob.fileName})`);
 
-    // Actually push the file to the printer and start it. Previous behaviour
-    // only fired an event with no listener, so "Process next" was a silent
-    // no-op for the user.
-    await this.submitToPrinter(printerId, nextJob.id);
+      // Actually push the file to the printer and start it. Previous behaviour
+      // only fired an event with no listener, so "Process next" was a silent
+      // no-op for the user.
+      await this.submitToPrinterInner(printerId, nextJob.id);
 
-    return nextJob;
+      return nextJob;
+    });
   }
 
   private async ensurePrinterNotInMaintenance(printerId: number): Promise<void> {
@@ -407,6 +460,14 @@ export class PrintQueueService implements IPrintQueueService {
   // firmware or silently clobber the running job's tracking. STARTING is
   // included because that's our own "upload in flight" marker — the printer is
   // already receiving bytes and a second dispatch would collide on the wire.
+  //
+  // Stale-job reconciliation: the DB row is only as good as the last poll edge
+  // we observed. If a print's terminal transition was missed (poll gap, server
+  // downtime, a finish routed through ATTENTION), a PRINTING/PAUSED row lingers
+  // and the printer becomes permanently un-dispatchable even though it is
+  // physically idle. So before blocking, cross-check the live hardware state:
+  // if the latest fresh poll says the printer is unambiguously idle, the row is
+  // a zombie — close it as UNKNOWN and let the new print through.
   private async ensurePrinterIdle(printerId: number, exceptJobId: number): Promise<void> {
     const active = await this.printJobRepository.findOne({
       where: [
@@ -417,10 +478,61 @@ export class PrintQueueService implements IPrintQueueService {
       order: { startedAt: "DESC" },
     });
 
-    if (active && active.id !== exceptJobId) {
-      throw new BadRequestException(
-        `Printer ${printerId} is busy with job ${active.id} (${active.status}) and cannot start another print.`,
-      );
+    if (!active || active.id === exceptJobId) {
+      return;
+    }
+
+    // STARTING is never reconciled away: an upload legitimately coexists with an
+    // idle-reading printer (bytes are still streaming, Print-After-Upload hasn't
+    // fired yet), so a STARTING row is a real in-flight dispatch, not a zombie.
+    if (active.status !== "STARTING") {
+      const liveState = await this.getFreshLiveState(printerId);
+      if (liveState && PrintQueueService.LIVE_IDLE_STATES.has(liveState)) {
+        const staleStatus = active.status;
+        active.status = "UNKNOWN";
+        active.statusReason =
+          `Reconciled on dispatch: printer reported ${liveState} while the job was still ${staleStatus}. ` +
+          `The terminal transition was missed; marked UNKNOWN so the printer could accept a new print.`;
+        await this.printJobRepository.save(active);
+        this.logger.warn(
+          `Printer ${printerId}: cleared stale ${staleStatus} job ${active.id} (live state ${liveState}) ` +
+            `before dispatching job ${exceptJobId}.`,
+        );
+        return;
+      }
+    }
+
+    throw new BadRequestException(
+      `Printer ${printerId} is busy with job ${active.id} (${active.status}) and cannot start another print.`,
+    );
+  }
+
+  // Live printer states that mean "genuinely doing nothing" — safe to treat a
+  // lingering active DB job as stale. BUSY and ATTENTION are deliberately
+  // excluded: verified against Buddy firmware (src/state/printer_state.cpp),
+  // BUSY is emitted mid-print during automatic crash-recovery / power-panic
+  // resume, and ATTENTION is an ambiguous hold (runout / prompt) — neither
+  // proves the printer is free. (Tool changes stay PRINTING, not BUSY.)
+  private static readonly LIVE_IDLE_STATES = new Set(["READY", "IDLE", "FINISHED", "STOPPED"]);
+  // Ignore a poll snapshot older than this when deciding a job is stale.
+  // Comfortably above the max poll interval (60s) so one missed tick is fine,
+  // yet short enough that an offline printer's last reading can't auto-clear a
+  // job — when stale/missing we fall back to blocking, the conservative choice.
+  private static readonly LIVE_STATE_MAX_AGE_MS = 120_000;
+
+  // Most recent PrusaLink link_state polled for this printer, upper-cased, or
+  // undefined when we have no fresh snapshot (never polled, offline, or stale).
+  private async getFreshLiveState(printerId: number): Promise<string | undefined> {
+    try {
+      const events = await this.printerEventsCache.getPrinterSocketEvents(printerId);
+      const current = (events as any)?.current;
+      if (!current) return undefined;
+      const ageMs = Date.now() - (current.receivedAt ?? 0);
+      if (ageMs > PrintQueueService.LIVE_STATE_MAX_AGE_MS) return undefined;
+      const state: string | undefined = current.payload?.state?.text;
+      return state?.toUpperCase();
+    } catch {
+      return undefined;
     }
   }
 
@@ -463,6 +575,13 @@ export class PrintQueueService implements IPrintQueueService {
   }
 
   async submitToPrinter(printerId: number, jobId: number): Promise<void> {
+    // Public entry point — take the per-printer lock so the idle-check → STARTING
+    // claim is atomic against a concurrent processQueue/submitToPrinter.
+    return this.withPrinterLock(printerId, () => this.submitToPrinterInner(printerId, jobId));
+  }
+
+  // The claim itself, assumed to run under `withPrinterLock(printerId)`.
+  private async submitToPrinterInner(printerId: number, jobId: number): Promise<void> {
     const job = await this.printJobRepository.findOne({ where: { id: jobId } });
 
     if (!job) {
@@ -556,8 +675,8 @@ export class PrintQueueService implements IPrintQueueService {
       this.logger.log(`Successfully submitted job ${jobId} to printer ${printerId}`);
       this.eventEmitter2.emit("printQueue.jobSubmitted", { printerId, jobId });
     } catch (error) {
-      // Re-read and roll back to QUEUED so the next "process next" (or
-      // auto-advance) can retry. queuePosition is left intact so the job
+      // Re-read and roll back to QUEUED so the operator can retry via the
+      // manual "process next". queuePosition is left intact so the job
       // stays in its slot.
       job = (await this.printJobRepository.findOne({ where: { id: jobId } })) ?? job;
       job.status = "QUEUED";

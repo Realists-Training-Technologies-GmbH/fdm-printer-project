@@ -4,6 +4,7 @@ import { LoggerService } from "@/handlers/logger";
 import { PrintJobService } from "@/services/orm/print-job.service";
 import { FileStorageService } from "@/services/file-storage.service";
 import { FileAnalysisService } from "@/services/file-analysis.service";
+import { printerEvents, type PrintersDeletedEvent } from "@/constants/event.constants";
 import EventEmitter2 from "eventemitter2";
 
 export interface CachedPrinterThumbnail {
@@ -30,6 +31,18 @@ export class PrinterThumbnailCache extends KeyDiffCache<CachedPrinterThumbnail> 
   ) {
     super();
     this.logger = loggerFactory(PrinterThumbnailCache.name);
+    // Drop a deleted printer's cached thumbnail. Without this the entry lived
+    // forever (memory leak across printer churn) and — if SQLite reused the id
+    // for a new printer — its idle tile served the OLD printer's image.
+    this.eventEmitter2.on(printerEvents.printersDeleted, (e: PrintersDeletedEvent) => {
+      void this.handlePrintersDeleted(e);
+    });
+  }
+
+  private async handlePrintersDeleted(event: PrintersDeletedEvent): Promise<void> {
+    for (const id of event.printerIds) {
+      await this.unsetPrinterThumbnail(id);
+    }
   }
 
   async loadCache() {

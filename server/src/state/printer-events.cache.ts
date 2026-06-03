@@ -1,5 +1,5 @@
 import { KeyDiffCache } from "@/utils/cache/key-diff.cache";
-import { printerEvents, PrintersDeletedEvent } from "@/constants/event.constants";
+import { printerEvents, PrintersDeletedEvent, type PrinterUpdatedEvent } from "@/constants/event.constants";
 import EventEmitter2 from "eventemitter2";
 import { prusaLinkEvent } from "@/services/prusa-link/constants/prusalink.constants";
 import type { PrusaLinkEventDto } from "@/services/prusa-link/constants/prusalink-event.dto";
@@ -135,6 +135,20 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
   private subscribeToEvents() {
     this.eventEmitter2.on(prusaLinkEvent("*"), (e) => this.onPrusaLinkPollMessage(e));
     this.eventEmitter2.on(printerEvents.printersDeleted, this.handlePrintersDeleted.bind(this));
+    this.eventEmitter2.on(printerEvents.printerUpdated, this.handlePrinterUpdated.bind(this));
+  }
+
+  // When a printer is disabled its poller is torn down (printer-socket.store),
+  // so the cached live snapshot would otherwise freeze at its last reading and
+  // keep being fanned out to clients, and a stale `lastPollState` would trip a
+  // spurious "missed terminal edge" on re-enable. Clear both on disable.
+  private async handlePrinterUpdated(event: PrinterUpdatedEvent) {
+    const printer = event?.printer;
+    if (!printer?.id) return;
+    if (printer.enabled === false) {
+      this.lastPollState.delete(printer.id);
+      await this.deletePrinterSocketEvents(printer.id);
+    }
   }
 
   private async getPrinterName(printerId: number): Promise<string | undefined> {
@@ -160,6 +174,13 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
     // completion/failure transition before this was rewritten.
     const stateText: string | undefined = payload?.state?.text;
     const stateUpper = stateText?.toUpperCase() ?? "";
+    // Canonical state key for transition logic. In ATTENTION the adapter
+    // prefixes the firmware reason ("ATTENTION: Filament runout"), so the raw
+    // `stateUpper` carries the message. Strip it to a bare "ATTENTION" so every
+    // comparison and the `lastPollState` edge tracking key off the base state,
+    // not the (varying) message — otherwise `prev` would never equal "ATTENTION"
+    // and the ATTENTION→idle close (and ERROR exclusion) would silently break.
+    const baseState = stateUpper.startsWith("ATTENTION") ? "ATTENTION" : stateUpper;
     const flags = payload?.state?.flags;
     // Prefer the long display name over the firmware's short DOS-style
     // path so the PrintJob row gets stored as "WIRBEL_TESTPART.BGC"
@@ -179,15 +200,9 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
     const usbDisplayName: string | undefined = payload?.job?.file?.display ?? payload?.job?.file?.name;
     const completion = payload?.progress?.completion;
 
-    // Progress updates continuously and is not a transition, so it runs every
-    // poll (it no-ops when there's no active PRINTING job).
-    if (typeof completion === "number" && filename) {
-      await this.printJobService.markProgress(printerId, filename, completion);
-    }
-
     const prev = this.lastPollState.get(printerId);
 
-    if (stateUpper === "PRINTING" && filename) {
+    if (baseState === "PRINTING" && filename) {
       if (prev !== "PRINTING") {
         if (prev === "PAUSED") {
           // Resumed from a pause we previously observed.
@@ -213,12 +228,12 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
         }
         this.lastPollState.set(printerId, "PRINTING");
       }
-    } else if (stateUpper === "PAUSED" && filename) {
+    } else if (baseState === "PAUSED" && filename) {
       if (prev !== "PAUSED") {
         await this.printJobService.handlePrintPaused(printerId);
         this.lastPollState.set(printerId, "PAUSED");
       }
-    } else if (stateUpper === "FINISHED") {
+    } else if (baseState === "FINISHED") {
       // PrusaLink terminal states. ATTENTION is purposefully excluded — it's a
       // transient hold, not a job ending. FINISHED ends the job as completed.
       // The filename guard used to wrap this branch but PrusaLink sometimes
@@ -232,34 +247,43 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
         }
         this.lastPollState.set(printerId, "FINISHED");
       }
-    } else if (stateUpper === "STOPPED" || stateUpper === "CANCELLING" || flags?.cancelling) {
+    } else if (baseState === "STOPPED" || baseState === "CANCELLING" || flags?.cancelling) {
       // STOPPED is PrusaLink's "user cancelled" terminal state. Match the
       // controller's cancel path so the job ends up as CANCELLED, not FAILED.
       if (prev !== "STOPPED" && prev !== "CANCELLING") {
         await this.printJobService.handlePrintCancelled(printerId, stateText ?? "Cancelled");
-        this.lastPollState.set(printerId, stateUpper || "STOPPED");
+        this.lastPollState.set(printerId, baseState || "STOPPED");
       }
-    } else if ((stateUpper === "ERROR" || flags?.error) && !stateUpper.startsWith("ATTENTION")) {
+    } else if ((baseState === "ERROR" || flags?.error) && baseState !== "ATTENTION") {
       if (prev !== "ERROR") {
         await this.printJobService.handlePrintFailed(printerId, stateText ?? "Error", filename);
         this.lastPollState.set(printerId, "ERROR");
       }
-    } else if (stateUpper) {
+    } else if (baseState) {
       // Safety net for missed terminal edges. PrusaLink's FINISHED state stays
       // until the user acknowledges on the printer screen, but a network blip
       // during the FINISHED window — or firmware that skips straight to READY
       // — would otherwise leave the DB row stuck in PRINTING forever (which
       // then blocks `ensurePrinterIdle` and silently kills "process next").
       //
-      // Only fire on truly idle states (READY/IDLE/BUSY). ATTENTION is
-      // explicitly excluded: it can mean either "print done, please remove"
-      // (terminal-ish) OR "filament runout, intervene" (mid-print pause). We
-      // can't distinguish without more context, so we'd rather leave the job
-      // marked PRINTING than wrongly mark a stuck-on-attention job COMPLETED.
-      // The user can always intervene physically; the dispatch path is what
-      // matters and that's not blocked by attention.
-      const isIdle = stateUpper === "READY" || stateUpper === "IDLE" || stateUpper === "BUSY";
-      if (isIdle && (prev === "PRINTING" || prev === "PAUSED")) {
+      // States that mean the print is genuinely over. BUSY is deliberately NOT
+      // here: verified against Buddy firmware (src/state/printer_state.cpp),
+      // BUSY is emitted mid-print during automatic crash-recovery and
+      // power-panic resume (CrashRecovery_*/PowerPanic_* phases), so treating
+      // it as "idle" would wrongly close a job that is still printing. (Tool
+      // changes stay PRINTING per the same firmware — they are not BUSY.)
+      const isIdle = baseState === "READY" || baseState === "IDLE";
+      // Prev-states from which reaching a genuinely idle state means a print
+      // ended:
+      //  - ATTENTION: a finish/cancel routed through a "remove the print" /
+      //    filament-runout / crash prompt before settling to IDLE. (We don't
+      //    close *on* ATTENTION above — it's ambiguous "done" vs "intervene".)
+      //  - BUSY: a post-print or crash-recovery busy phase that then settles.
+      // handlePrintCompleted no-ops when there's no active PRINTING/PAUSED job,
+      // so a spurious prev here is harmless. Without these, a job routed
+      // PRINTING → ATTENTION/BUSY → IDLE stayed stuck PRINTING forever and
+      // blocked `ensurePrinterIdle` (the printer refused every new print).
+      if (isIdle && (prev === "PRINTING" || prev === "PAUSED" || prev === "ATTENTION" || prev === "BUSY")) {
         this.logger.warn(
           `Printer ${printerId}: missed terminal-state edge — observed ${stateUpper} after ${prev}. Closing active job as completed.`,
         );
@@ -270,7 +294,16 @@ export class PrinterEventsCache extends KeyDiffCache<PrinterEventsCacheDto> {
       }
       // Idle / READY / BUSY / ATTENTION — not a tracked transition, but record
       // it so a subsequent PRINTING is detected as a fresh start edge.
-      this.lastPollState.set(printerId, stateUpper);
+      this.lastPollState.set(printerId, baseState);
+    }
+
+    // Progress is not a transition, so update it AFTER the transition logic
+    // above. On a start edge, markProgress matches the active PRINTING job by
+    // printerId (not filename), so running it first would stamp the new print's
+    // progress onto the previous job that handlePrintStarted is about to close
+    // (UNKNOWN). Running it last targets the just-started/adopted job.
+    if (typeof completion === "number" && filename) {
+      await this.printJobService.markProgress(printerId, filename, completion);
     }
   }
 }

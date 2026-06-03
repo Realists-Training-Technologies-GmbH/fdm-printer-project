@@ -12,12 +12,21 @@ import { errorSummary } from "@/utils/error.utils";
 interface CachedFirmwareEntry {
   info: PrusaLinkModelInfo;
   fetchedAt: number;
+  /** True when `info` is the fail-open fallback from a fetch error (short TTL). */
+  isFailure?: boolean;
   /** Resolves to the in-flight info promise so concurrent lookups share work. */
   inFlight?: Promise<PrusaLinkModelInfo>;
 }
 
 const TTL_MS = 60 * 60 * 1000; // 1h — model doesn't change without a deliberate user action
+// A *failed* fetch fails open ({supportsBgcode:null}) — caching that for the
+// full hour would let a `.bgcode` print through to a legacy MK3 (whose real
+// answer is "no") for up to an hour after one transient blip. Expire failures
+// fast so the next compatibility check re-probes.
+const FAILURE_TTL_MS = 30 * 1000;
 const FETCH_TIMEOUT_MS = 2_500;
+
+const entryTtl = (entry: CachedFirmwareEntry) => (entry.isFailure ? FAILURE_TTL_MS : TTL_MS);
 
 /**
  * Caches per-printer firmware info we use to make compatibility decisions
@@ -53,7 +62,7 @@ export class PrinterFirmwareCache {
   getCachedInfoSync(printerId: number): PrusaLinkModelInfo | null {
     const entry = this.entries.get(printerId);
     if (!entry) return null;
-    if (Date.now() - entry.fetchedAt > TTL_MS) return null;
+    if (Date.now() - entry.fetchedAt > entryTtl(entry)) return null;
     return entry.info;
   }
 
@@ -64,7 +73,7 @@ export class PrinterFirmwareCache {
    */
   async getOrFetch(printerId: number): Promise<PrusaLinkModelInfo> {
     const cached = this.entries.get(printerId);
-    const fresh = cached && Date.now() - cached.fetchedAt <= TTL_MS;
+    const fresh = cached && Date.now() - cached.fetchedAt <= entryTtl(cached);
 
     if (fresh) return cached!.info;
     if (cached?.inFlight) return cached.inFlight;
@@ -77,9 +86,10 @@ export class PrinterFirmwareCache {
       .catch((error) => {
         this.logger.debug(`Firmware fetch failed for printer ${printerId}: ${errorSummary(error)}`);
         const fallback: PrusaLinkModelInfo = { model: null, supportsBgcode: null, raw: null };
-        // Cache the failure briefly so a wave of compatibility lookups doesn't
-        // hammer an unreachable printer.
-        this.entries.set(printerId, { info: fallback, fetchedAt: Date.now() });
+        // Cache the failure briefly (FAILURE_TTL_MS, not the 1h model TTL) so a
+        // wave of compatibility lookups doesn't hammer an unreachable printer,
+        // but a transient blip doesn't leave the printer failing open for an hour.
+        this.entries.set(printerId, { info: fallback, fetchedAt: Date.now(), isFailure: true });
         return fallback;
       });
 
