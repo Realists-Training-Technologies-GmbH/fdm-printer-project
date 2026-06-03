@@ -236,6 +236,60 @@
 
       </div>
 
+      <!-- Transfer block — the head of the queue is streaming to the
+           printer. Mirrors the "now printing" layout so dispatch feedback
+           is consistent, and only shows until the firmware flips to
+           PRINTING (at which point the print block above takes over). -->
+      <div
+        v-if="headIsTransferring && !isPrinting && !isPaused"
+        class="pdv-hero-header__now"
+      >
+        <div class="pdv-hero-header__thumb">
+          <FileThumbnailCell
+            v-if="queue[0]?.fileStorageId"
+            :file-storage-id="queue[0].fileStorageId"
+            :thumbnails="(queue[0].thumbnails as any) || []"
+          />
+          <v-icon v-else size="48" color="medium-emphasis">upload_file</v-icon>
+        </div>
+        <div class="pdv-hero-header__now-body">
+          <div class="pdv-hero-header__progress-row">
+            <span class="pdv-hero-header__file text-truncate" :title="transferFileName">
+              {{ transferFileName }}
+            </span>
+            <span class="pdv-hero-header__percent">
+              <template v-if="uploadProgress && uploadProgress.percent != null">
+                ↑ {{ uploadProgress.percent }}%
+              </template>
+            </span>
+          </div>
+          <v-progress-linear
+            :model-value="uploadProgress?.percent ?? 0"
+            :indeterminate="!uploadProgress || uploadProgress.percent == null"
+            color="info"
+            height="6"
+            rounded
+            striped
+          />
+          <div class="pdv-stats">
+            <span class="pdv-stats__item">
+              <v-icon size="14">upload</v-icon> Transferring to printer…
+            </span>
+            <v-btn
+              class="ml-auto"
+              size="x-small"
+              variant="text"
+              color="error"
+              prepend-icon="close"
+              :loading="cancelDispatchInFlight"
+              @click="cancelTransfer"
+            >
+              Cancel transfer
+            </v-btn>
+          </div>
+        </div>
+      </div>
+
       <!-- Compact-mode summary — single short line shown only when the
            hero is collapsed and a print is active. Keeps the file
            name, percent, remaining time and a Pause/Cancel within
@@ -287,11 +341,22 @@
         height="3"
         class="pdv-hero-header__progress-bottom"
       />
+      <v-progress-linear
+        v-else-if="headIsTransferring"
+        :model-value="uploadProgress?.percent ?? 0"
+        :indeterminate="!uploadProgress || uploadProgress.percent == null"
+        color="info"
+        height="3"
+        class="pdv-hero-header__progress-bottom"
+      />
     </div>
 
-    <!-- Attention banner — same priority order the side nav uses. -->
+    <!-- Attention banner — same priority order the side nav uses. The
+         'transferring' kind is suppressed here because the hero header
+         already shows the live transfer block + progress bar; surfacing it
+         as an attention alert too would double up. -->
     <v-alert
-      v-if="printerAttention.needsAttention"
+      v-if="printerAttention.needsAttention && printerAttention.kind !== 'transferring'"
       :type="attentionAlertType"
       :icon="printerAttention.icon"
       variant="tonal"
@@ -343,9 +408,9 @@
               <span
                 v-if="queue.length > 0"
                 class="pdv-section__hint"
-              >{{ queue.length }} job{{ queue.length === 1 ? '' : 's' }}</span>
+              >{{ queueHint }}</span>
               <span
-                v-if="queue.length > 1"
+                v-if="queuedCount > 1"
                 class="pdv-section__hint pdv-queue-draghint"
                 title="Drag any queue card to reorder"
               >
@@ -397,6 +462,7 @@
                        doesn't have to scan back up to the toolbar to
                        dispatch. -->
                   <article
+                    v-if="!headIsTransferring"
                     class="pdv-hero"
                     :class="{
                       'pdv-hero--starting': queue[0].status === 'STARTING',
@@ -562,7 +628,7 @@
                       @dragend="onQueueDragEnd()"
                     >
                       <v-icon class="pdv-queue__grip" size="14">drag_indicator</v-icon>
-                      <span class="pdv-queue-row__pos">{{ idx + 2 }}</span>
+                      <span class="pdv-queue-row__pos">{{ idx + (headIsTransferring ? 1 : 2) }}</span>
                       <div class="pdv-queue-row__thumb">
                         <FileThumbnailCell
                           v-if="job.fileStorageId"
@@ -621,6 +687,20 @@
                       </v-btn>
                     </li>
                   </TransitionGroup>
+
+                  <!-- Head is mid-dispatch and nothing else is waiting:
+                       the transferring job is shown in the status header,
+                       so the queue body would otherwise be blank. -->
+                  <div
+                    v-if="headIsTransferring && queue.length === 1"
+                    class="pdv-empty"
+                  >
+                    <v-icon size="32" color="info">upload_file</v-icon>
+                    <p class="text-body-2 text-medium-emphasis mt-2">
+                      Transferring to the printer — progress is shown in the
+                      status header above.
+                    </p>
+                  </div>
                 </template>
               </v-card-text>
             </v-card>
@@ -2346,6 +2426,82 @@ const sendToPrintDisabledReason = computed(() => {
   if (!isOperational.value) return 'Printer is not ready'
   return ''
 })
+
+// Live queue-dispatch transfer progress, mirrored from the grid tile
+// (PrinterGridTile.uploadProgress) so the detail header and the grid agree.
+// While a STARTING job's file streams to PrusaLink the printer reports IDLE,
+// so the firmware's print progress is unset — this upload signal is all we
+// have. Prefer the firmware's own transfer.progress (bytes flushed to its
+// storage); fall back to axios bytes so the first moments still move the bar.
+const uploadProgress = computed<{ percent: number | null; fileName: string } | null>(() => {
+  if (!props.printerId) return null
+  const entry = printerStateStore.queueUploadsByPrinterId[props.printerId]
+  if (!entry) return null
+  // Use ONLY the firmware's own transfer.progress (bytes the printer has
+  // flushed to its storage) for the displayed percentage. We deliberately do
+  // NOT fall back to axios bytes: over LAN the server hands the whole file to
+  // the kernel send buffer almost instantly, so axios races to 100% and then
+  // the slower-but-truthful firmware number resets it to ~1% and climbs —
+  // that's the jarring "100% → reset → 1…100" the operator sees. While the
+  // firmware hasn't reported a real 0–1 progress yet, `percent` stays null and
+  // the bar renders indeterminate (a moving "streaming" animation).
+  const firmwareTransfer = (printerEvents.value?.current?.payload as any)?.transfer
+  const raw = firmwareTransfer?.progress
+  const percent =
+    typeof raw === 'number' && raw >= 0 && raw <= 1 ? Math.round(raw * 100) : null
+  return { percent, fileName: entry.fileName }
+})
+
+// The head of the queue is mid-dispatch: its file is streaming to the
+// printer. We surface it in the hero header (with the transfer bar) instead
+// of as a dispatchable "next up" card, so the queue only ever lists jobs the
+// operator can still act on.
+const headIsTransferring = computed(() => queue.value[0]?.status === 'STARTING')
+
+// Jobs still genuinely waiting (excludes the transferring head, which lives
+// in the header now).
+const queuedCount = computed(() =>
+  headIsTransferring.value ? Math.max(0, queue.value.length - 1) : queue.value.length,
+)
+
+// Section-header hint: "N jobs", with a "1 transferring" prefix while the
+// head is mid-dispatch so the count still reconciles with what's listed.
+const queueHint = computed(() => {
+  const n = queuedCount.value
+  const queued = `${n} job${n === 1 ? '' : 's'}`
+  if (headIsTransferring.value) return n > 0 ? `1 transferring · ${queued}` : '1 transferring'
+  return queued
+})
+
+// File name shown in the header transfer block — the upload entry carries it,
+// but fall back to the queue head while the entry is still spinning up.
+const transferFileName = computed(() =>
+  uploadProgress.value?.fileName ?? (queue.value[0] ? displayQueueName(queue.value[0]) : '—'),
+)
+
+// Cancel an in-flight dispatch transfer. Mirrors PrinterGridTile.cancelDispatch:
+// success is announced by the server's `jobSubmissionFailed` (cancelled: true)
+// socket event — which routes a toast through socketio.service — so we only
+// surface a toast on a real error. 404/400 are benign no-ops (nothing left to
+// cancel because the upload already finished or never started).
+const cancelDispatchInFlight = ref(false)
+async function cancelTransfer() {
+  if (!props.printerId || cancelDispatchInFlight.value) return
+  cancelDispatchInFlight.value = true
+  try {
+    await PrintQueueService.cancelDispatch(props.printerId)
+  } catch (e: any) {
+    const status = e?.response?.status
+    if (status !== 404 && status !== 400) {
+      snackbar.openErrorMessage({
+        title: 'Could not cancel transfer',
+        subtitle: e?.message ?? 'Unknown error',
+      })
+    }
+  } finally {
+    cancelDispatchInFlight.value = false
+  }
+}
 const isUnderMaintenance = computed(
   () => !printer.value?.enabled && !!printer.value?.disabledReason,
 )
@@ -3271,6 +3427,18 @@ watch(
 watch(storageTab, (next) => {
   if (next === 'internal') void loadFiles()
 })
+
+// Keep the queue in sync with live state without a manual refresh: when a
+// dispatch transfer starts/ends (upload entry appears/disappears) or the
+// printer flips in/out of PRINTING, the stale STARTING head needs to drop
+// out and the next job surface. These transitions are rare (once per
+// dispatch / print boundary), so reloading on them won't thrash the API.
+watch(
+  [() => !!uploadProgress.value, isPrinting],
+  () => {
+    if (props.printerId) void loadQueue()
+  },
+)
 
 // ── Formatters ──
 function formatDuration(seconds: number | null | undefined): string {
