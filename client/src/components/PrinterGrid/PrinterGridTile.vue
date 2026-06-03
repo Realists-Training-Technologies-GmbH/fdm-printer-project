@@ -77,9 +77,9 @@
         <div class="pg-tile__body">
           <div
             class="pg-tile__thumb"
-            :class="{ 'pg-tile__thumb--clickable': previewCanOpen }"
-            :title="previewCanOpen ? (thumbnail?.length ? 'View larger preview' : 'View print info') : undefined"
-            @click.stop.prevent="previewCanOpen && (previewOpen = true)"
+            :class="{ 'pg-tile__thumb--clickable': thumbClickable }"
+            :title="thumbTitle"
+            @click.stop.prevent="onThumbClick"
           >
             <!-- While a file is streaming to the printer, show its preview
                  (resolved from the upload-progress payload's fileStorageId).
@@ -342,6 +342,8 @@ import { useIntervalFn } from '@vueuse/core'
 import { derivePrinterAttention } from '@/shared/printer-attention.util'
 import { notifyPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
+import { useDialog } from '@/shared/dialog.composable'
+import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { useRouter } from 'vue-router'
 import { PrintersService } from '@/backend'
 import { usePrinterStore } from '@/store/printer.store'
@@ -414,6 +416,30 @@ const cancelInFlight = ref(false)
 const previewCanOpen = computed(
   () => !!thumbnail.value?.length || !!thumbnailRecord.value?.job?.metadata,
 )
+
+// Clicking the thumb opens the right preview for whatever the tile is
+// currently showing. During a transfer that's the file being streamed (via
+// the shared thumbnail viewer, keyed off the upload payload) — NOT the tile's
+// active-print preview, which would otherwise surface the previous print's
+// stale image/metadata.
+const jobThumbnailViewer = useDialog(DialogName.JobThumbnailViewer)
+const thumbIsTransfer = computed(() => !!uploadProgress.value && !!transferThumbnailUrl.value)
+const thumbClickable = computed(() => thumbIsTransfer.value || previewCanOpen.value)
+const thumbTitle = computed<string | undefined>(() => {
+  if (thumbIsTransfer.value) return 'View transferring file'
+  if (previewCanOpen.value) return thumbnail.value?.length ? 'View larger preview' : 'View print info'
+  return undefined
+})
+function onThumbClick() {
+  if (thumbIsTransfer.value && transferFileStorageId.value) {
+    jobThumbnailViewer.openDialog({
+      fileStorageId: transferFileStorageId.value,
+      thumbnails: transferThumbnails.value,
+    })
+    return
+  }
+  if (previewCanOpen.value) previewOpen.value = true
+}
 
 async function cancelDispatch() {
   if (!printerId.value || cancelInFlight.value) return
