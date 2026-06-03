@@ -1956,15 +1956,13 @@ const props = defineProps<{ printerId: number }>()
 const router = useRouter()
 const route = useRoute()
 
-// `router.back()` is a no-op when the detail view was opened directly (deep
-// link, page refresh, or first navigation of the session) — there's no in-app
-// history entry to return to. Fall back to the dashboard grid in that case.
+// The back button always returns to the printer grid — the operator's home
+// base — regardless of how the detail view was reached (in-app navigation,
+// deep link, or page refresh). Using a fixed destination instead of
+// router.back() keeps it predictable: it never lands on Files/History/etc.
+// just because that's where the operator happened to come from.
 function goBack() {
-  if (window.history.state?.back) {
-    router.back()
-  } else {
-    void router.push('/')
-  }
+  void router.push('/printer-grid')
 }
 const printerStore = usePrinterStore()
 const printerStateStore = usePrinterStateStore()
