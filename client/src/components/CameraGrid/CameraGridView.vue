@@ -315,16 +315,16 @@ import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { useMutation, useQuery } from '@tanstack/vue-query'
 import { CameraWithPrinter } from '@/models/camera-streams/camera-stream'
 import { usePrinterStore } from '@/store/printer.store'
-import { useFileExplorer } from '@/shared/file-explorer.composable'
+import { useRouter } from 'vue-router'
 import type { PrinterDto } from '@/models/printers/printer.model'
 import { getPrinterTypeName } from '@/shared/printer-types.constants'
 import { usePrinterFilters } from '@/shared/printer-filter.composable'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
 
 const route = useRoute()
+const router = useRouter()
 const printerStore = usePrinterStore()
 const dialog = useDialog(DialogName.AddOrUpdateCameraDialog)
-const fileExplorer = useFileExplorer()
 
 const { loadTags } = usePrinterFilters()
 
@@ -502,7 +502,9 @@ function deleteCamera(cameraId?: number) {
 }
 
 function openPrinterSideNav(printer: PrinterDto) {
-  fileExplorer.openFileExplorer(printer)
+  // Open the individual printer view (its Print tab shows storage/USB files)
+  // instead of the old slide-out file-explorer panel.
+  void router.push(`/printer/${printer.id}`)
 }
 
 // Get camera container style (aspect ratio)

@@ -7,28 +7,30 @@
         color="secondary"
         rounded
         size="small"
-        @click.c.capture.native.stop="openFileExplorer()"
+        @click.stop="openPrinter()"
       >
         <v-icon>folder</v-icon>
       </v-btn>
     </template>
-    <template v-slot:default>Open file explorer</template>
+    <template v-slot:default>Open printer files</template>
   </v-tooltip>
 </template>
 
 <script lang="ts" setup>
 import { PrinterDto } from '@/models/printers/printer.model'
-import { useFileExplorer } from '@/shared/file-explorer.composable'
+import { useRouter } from 'vue-router'
 
 interface Props {
   printer: PrinterDto
 }
 
 const props = defineProps<Props>()
-const fileExplorer = useFileExplorer()
+const router = useRouter()
 
-function openFileExplorer() {
+// Open the individual printer view (its Print tab shows storage/USB files)
+// instead of the old slide-out file-explorer panel.
+function openPrinter() {
   if (!props.printer) return
-  fileExplorer.openFileExplorer(props.printer)
+  void router.push(`/printer/${props.printer.id}`)
 }
 </script>

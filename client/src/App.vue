@@ -35,7 +35,6 @@
     <OctoFarmImportDialog />
     <YamlImportExportDialog />
     <ManageTagsDialog />
-    <FileExplorerSideNav />
     <ConfirmDialog />
     <PrinterControlDialog />
     <JsonViewerDialog />
