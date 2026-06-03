@@ -139,10 +139,10 @@
               size="x-small"
               variant="flat"
               :prepend-icon="isPaused ? 'play_arrow' : 'pause'"
-              :loading="pauseToggleBusy"
+              :loading="pauseToggleLoading"
               @click="isPaused ? clickResumePrint() : clickPausePrint()"
             >
-              {{ isPaused ? 'Resume' : 'Pause' }}
+              {{ pauseButtonLabel }}
             </v-btn>
             <v-btn
               v-if="isStoppable"
@@ -313,10 +313,10 @@
           size="x-small"
           variant="tonal"
           :prepend-icon="isPaused ? 'play_arrow' : 'pause'"
-          :loading="pauseToggleBusy"
+          :loading="pauseToggleLoading"
           @click="isPaused ? clickResumePrint() : clickPausePrint()"
         >
-          {{ isPaused ? 'Resume' : 'Pause' }}
+          {{ pauseButtonLabel }}
         </v-btn>
         <v-btn
           v-if="isStoppable"
@@ -2052,12 +2052,49 @@ const pauseToggleBusy = ref(false)
 const stopBusy = ref(false)
 const queueProcessingNext = ref(false)
 
+// The pause/resume HTTP call only *sends* the command — the firmware takes a
+// few seconds to actually transition, and PrusaLink only surfaces it on the
+// next poll (~5s). Without bridging that gap the button's spinner vanishes
+// the instant the request returns and the label snaps back to "Resume",
+// leaving the operator staring at an unchanged screen until the poll lands —
+// it reads as "nothing happened / it's slow". We keep the button in a
+// "Resuming…/Pausing…" pending state until the live state confirms the
+// transition (or a safety timeout fires), and force an immediate re-poll.
+const pausePendingAction = ref<'pause' | 'resume' | null>(null)
+let pausePendingTimer: ReturnType<typeof setTimeout> | null = null
+function clearPausePending() {
+  pausePendingAction.value = null
+  if (pausePendingTimer) {
+    clearTimeout(pausePendingTimer)
+    pausePendingTimer = null
+  }
+}
+function beginPausePending(action: 'pause' | 'resume') {
+  pausePendingAction.value = action
+  if (pausePendingTimer) clearTimeout(pausePendingTimer)
+  // Safety net: never let the button stick in a fake-busy state if the
+  // expected flag never arrives (firmware quirk, missed poll, etc.).
+  pausePendingTimer = setTimeout(() => clearPausePending(), 20000)
+}
+
+onBeforeUnmount(clearPausePending)
+
+const pauseButtonLabel = computed(() => {
+  if (pausePendingAction.value === 'resume') return 'Resuming…'
+  if (pausePendingAction.value === 'pause') return 'Pausing…'
+  return isPaused.value ? 'Resume' : 'Pause'
+})
+const pauseToggleLoading = computed(() => pauseToggleBusy.value || pausePendingAction.value !== null)
+
 async function clickPausePrint() {
-  if (!props.printerId) return
+  if (!props.printerId || pauseToggleLoading.value) return
   pauseToggleBusy.value = true
   try {
     await PrintersService.pausePrintJob(props.printerId)
     notifyPrintJobsChanged({ printerId: props.printerId, reason: 'detailview:pause' })
+    snackbar.openInfoMessage({ title: 'Pausing print…' })
+    beginPausePending('pause')
+    void refreshSocketState()
   } catch (e: any) {
     snackbar.openErrorMessage({
       title: 'Could not pause',
@@ -2068,11 +2105,14 @@ async function clickPausePrint() {
   }
 }
 async function clickResumePrint() {
-  if (!props.printerId) return
+  if (!props.printerId || pauseToggleLoading.value) return
   pauseToggleBusy.value = true
   try {
     await PrintersService.resumePrintJob(props.printerId)
     notifyPrintJobsChanged({ printerId: props.printerId, reason: 'detailview:resume' })
+    snackbar.openInfoMessage({ title: 'Resuming print…' })
+    beginPausePending('resume')
+    void refreshSocketState()
   } catch (e: any) {
     snackbar.openErrorMessage({
       title: 'Could not resume',
@@ -2409,6 +2449,14 @@ const isOperational = computed(() => !!flags.value?.operational)
 const isStoppable = computed(
   () => !!(flags.value?.printing || flags.value?.paused || flags.value?.pausing),
 )
+
+// Clear the pause/resume pending state the moment the live flags confirm the
+// transition (declared here, after the flags, so the eager watch source
+// doesn't reference them before initialization). See beginPausePending above.
+watch([isPrinting, isPaused], () => {
+  if (pausePendingAction.value === 'resume' && isPrinting.value && !isPaused.value) clearPausePending()
+  if (pausePendingAction.value === 'pause' && isPaused.value) clearPausePending()
+})
 
 // Centralised gate for the "Send to print" dispatch button. Returns the
 // human-readable reason it's blocked, or '' when it's clickable. Dispatch
