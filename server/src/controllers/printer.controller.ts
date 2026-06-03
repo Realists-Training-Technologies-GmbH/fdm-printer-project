@@ -22,6 +22,7 @@ import type { ILoggerFactory } from "@/handlers/logger-factory";
 import type { Request, Response } from "express";
 import type { IPrinterService } from "@/services/interfaces/printer.service.interface";
 import type { IPrintJobService } from "@/services/orm/print-job.service";
+import type { PrintQueueService } from "@/services/print-queue.service";
 import type { LoginDto } from "@/services/interfaces/login.dto";
 import { AxiosError } from "axios";
 import { FailedDependencyException } from "@/exceptions/failed-dependency.exception";
@@ -48,6 +49,7 @@ export class PrinterController {
     private readonly printerApi: IPrinterApi,
     private readonly floorStore: FloorStore,
     private readonly printJobService: IPrintJobService,
+    private readonly printQueueService: PrintQueueService,
   ) {
     this.logger = loggerFactory(PrinterController.name);
   }
@@ -293,7 +295,14 @@ export class PrinterController {
       } else if (action === "resume") {
         await this.printJobService.handlePrintResumed(currentPrinterId);
       } else if (action === "cancel") {
-        await this.printJobService.handlePrintCancelled(currentPrinterId, "Cancelled by user");
+        const cancelledJob = await this.printJobService.handlePrintCancelled(currentPrinterId, "Cancelled by user");
+        // Manual UI cancel re-queues the file at the FRONT so the operator can
+        // restart it with one click. Printer-side cancels and failures flow
+        // through the polling watcher (not this endpoint), so they don't
+        // re-queue — only a deliberate "Cancel print" does.
+        if (cancelledJob) {
+          await this.printQueueService.requeueCancelledJobAtFront(cancelledJob);
+        }
       }
     } catch (err) {
       this.logger.warn(

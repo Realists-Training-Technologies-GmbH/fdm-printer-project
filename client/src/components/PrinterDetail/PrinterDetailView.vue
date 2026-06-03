@@ -2158,6 +2158,10 @@ async function clickStopPrint() {
   try {
     await PrintersService.stopPrintJob(props.printerId)
     notifyPrintJobsChanged({ printerId: props.printerId, reason: 'detailview:stop' })
+    // The server re-queues the cancelled file at the front of the queue;
+    // reload so it shows up immediately instead of waiting for the next poll.
+    await loadQueue()
+    snackbar.openInfoMessage({ title: 'Print cancelled' })
   } catch (e: any) {
     snackbar.openErrorMessage({
       title: 'Could not cancel',

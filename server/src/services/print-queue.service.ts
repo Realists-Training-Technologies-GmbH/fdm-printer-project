@@ -73,6 +73,8 @@ export interface QueuedJob {
 export interface IPrintQueueService {
   addToQueue(printerId: number, jobId: number, position?: number): Promise<void>;
 
+  requeueCancelledJobAtFront(sourceJob: PrintJob): Promise<PrintJob | null>;
+
   removeFromQueue(jobId: number): Promise<void>;
 
   getQueue(printerId: number): Promise<QueuedJob[]>;
@@ -206,6 +208,46 @@ export class PrintQueueService implements IPrintQueueService {
         position: job.queuePosition,
       });
     });
+  }
+
+  /**
+   * Re-queue the file from a just-cancelled print as a fresh QUEUED job at the
+   * FRONT of the printer's queue, so a manual "Cancel print" can be restarted
+   * with one click. The cancelled job is left untouched in history — we clone
+   * a new row from the same file + analysed metadata (compatibility was
+   * already proven: it was printing on this very printer a moment ago, so we
+   * skip the createJobFromFile validation gauntlet). Returns the new job, or
+   * null when the source carries no re-printable file reference.
+   */
+  async requeueCancelledJobAtFront(sourceJob: PrintJob): Promise<PrintJob | null> {
+    if (sourceJob.printerId == null) return null;
+    if (!sourceJob.fileStorageId && !sourceJob.usbFilePath) return null;
+
+    const clone = this.printJobRepository.create({
+      printerId: sourceJob.printerId,
+      printerName: sourceJob.printerName,
+      fileName: sourceJob.fileName,
+      fileStorageId: sourceJob.fileStorageId,
+      fileFormat: sourceJob.fileFormat,
+      fileSize: sourceJob.fileSize,
+      fileHash: sourceJob.fileHash,
+      usbFilePath: sourceJob.usbFilePath,
+      usbDisplayName: sourceJob.usbDisplayName,
+      analyzedAt: sourceJob.analyzedAt,
+      analysisState: sourceJob.analysisState,
+      metadata: sourceJob.metadata,
+      status: "PENDING",
+    });
+    const saved = await this.printJobRepository.save(clone);
+
+    // Position 0 = front; addToQueue shifts the rest down and flips it QUEUED.
+    await this.addToQueue(sourceJob.printerId, saved.id, 0);
+    this.logger.log(
+      `Re-queued cancelled job ${sourceJob.id} as ${saved.id} at the front of printer ${sourceJob.printerId}'s queue`,
+    );
+    // Re-read so the caller sees the post-addToQueue state (status QUEUED,
+    // queuePosition 0) rather than the stale pre-enqueue clone.
+    return this.printJobRepository.findOne({ where: { id: saved.id } });
   }
 
   async removeFromQueue(jobId: number): Promise<void> {
