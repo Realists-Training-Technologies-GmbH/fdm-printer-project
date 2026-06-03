@@ -228,6 +228,18 @@
                 · {{ timeRemainingFormatted }}<template v-if="etaClockFormatted"> · {{ etaClockFormatted }}</template>
               </span>
 
+              <v-tooltip
+                v-if="queueCount > 0"
+                location="top"
+                :text="`${queueCount} job${queueCount === 1 ? '' : 's'} queued`"
+              >
+                <template #activator="{ props: qp }">
+                  <span v-bind="qp" class="pg-tile__queue">
+                    <v-icon size="12">format_list_bulleted</v-icon> {{ queueCount }}
+                  </span>
+                </template>
+              </v-tooltip>
+
               <v-spacer />
 
               <span v-if="toolTemp" class="pg-tile__temp" title="Tool temperature">
@@ -356,6 +368,7 @@ import { useSnackbar } from '@/shared/snackbar.composable'
 import { PrintQueueService } from '@/backend/print-queue.service'
 import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
 import { useFileStorageThumbnailQuery } from '@/queries/file-storage-thumbnail.query'
+import { usePrinterQueueCounts } from '@/shared/printer-queue-counts.composable'
 import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { useQueryClient } from '@tanstack/vue-query'
 import PrinterTilePreviewDialog from './PrinterTilePreviewDialog.vue'
@@ -382,6 +395,12 @@ const snackbar = useSnackbar()
 const router = useRouter()
 
 const printerId = computed(() => props.printer?.id)
+
+// How many jobs are queued for this printer (from the shared global-queue
+// query) — surfaced on the tile so the operator can see a printer has work
+// lined up without opening its detail view.
+const { countsByPrinterId } = usePrinterQueueCounts()
+const queueCount = computed(() => (printerId.value ? countsByPrinterId.value[printerId.value] ?? 0 : 0))
 
 const isFirstTile = computed(() => props.x === 0 && props.y === 0)
 const noPrintersExist = computed(() => printerStore.printers.length === 0)
@@ -1015,6 +1034,15 @@ const clickConnectUsb = async () => {
   font-weight: 500;
   color: rgba(var(--v-theme-on-surface), 0.72);
   white-space: nowrap;
+}
+.pg-tile__queue {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-weight: 600;
+  color: rgba(var(--v-theme-on-surface), 0.72);
+  white-space: nowrap;
+  cursor: default;
 }
 
 .pg-tile__temp {
