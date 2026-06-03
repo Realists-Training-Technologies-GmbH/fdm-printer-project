@@ -126,9 +126,9 @@
           <div class="pg-tile__info">
             <div
               class="pg-tile__filename text-truncate"
-              :title="currentPrintingFilePath ?? 'No file'"
+              :title="uploadProgress?.fileName ?? currentPrintingFilePath ?? 'No file'"
             >
-              {{ currentPrintingFilePath ?? 'No file' }}
+              {{ uploadProgress?.fileName ?? currentPrintingFilePath ?? 'No file' }}
             </div>
 
             <v-progress-linear
