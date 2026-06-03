@@ -24,7 +24,7 @@
           icon="arrow_back"
           variant="text"
           size="small"
-          @click="router.back()"
+          @click="goBack"
         />
         <div class="pdv-hero-header__identity">
           <h1 class="pdv-hero-header__name text-truncate" :title="printer.name">
@@ -1864,6 +1864,17 @@ const props = defineProps<{ printerId: number }>()
 
 const router = useRouter()
 const route = useRoute()
+
+// `router.back()` is a no-op when the detail view was opened directly (deep
+// link, page refresh, or first navigation of the session) — there's no in-app
+// history entry to return to. Fall back to the dashboard grid in that case.
+function goBack() {
+  if (window.history.state?.back) {
+    router.back()
+  } else {
+    void router.push('/')
+  }
+}
 const printerStore = usePrinterStore()
 const printerStateStore = usePrinterStateStore()
 const maintenanceDialog = useDialog(DialogName.PrinterMaintenanceDialog)
