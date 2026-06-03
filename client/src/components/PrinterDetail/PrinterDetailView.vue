@@ -290,6 +290,26 @@
         </div>
       </div>
 
+      <!-- Awaiting-state placeholder — online but no parsed state yet (just
+           connected, or the backend restarted). Keeps the hero from going
+           blank so it never reads as "everything disappeared". -->
+      <div
+        v-if="showAwaitingState"
+        class="pdv-hero-header__now"
+      >
+        <div class="pdv-hero-header__thumb">
+          <v-progress-circular indeterminate size="28" width="3" color="medium-emphasis" />
+        </div>
+        <div class="pdv-hero-header__now-body">
+          <div class="pdv-hero-header__file">Connecting…</div>
+          <div class="pdv-stats">
+            <span class="pdv-stats__item">
+              <v-icon size="14">sync</v-icon> Waiting for the printer's state
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Compact-mode summary — single short line shown only when the
            hero is collapsed and a print is active. Keeps the file
            name, percent, remaining time and a Pause/Cancel within
@@ -2554,6 +2574,21 @@ const isUnderMaintenance = computed(
 
 const printerAttention = computed(() =>
   derivePrinterAttention(printer.value, printerEvents.value, socketState.value),
+)
+
+// Online but no parsed live state yet — the "Unknown/Awaiting state" gap
+// right after connecting or a backend restart. Without a placeholder the hero
+// body just goes blank (every block is gated on flags/currentJob), which
+// reads as "everything disappeared". Offline and maintenance have their own
+// indicators, and we defer to any active attention banner, so this only fills
+// the genuine empty gap.
+const showAwaitingState = computed(
+  () =>
+    isOnline.value &&
+    !flags.value &&
+    !headIsTransferring.value &&
+    !isUnderMaintenance.value &&
+    !printerAttention.value.needsAttention,
 )
 const attentionAlertType = computed<'error' | 'warning' | 'info'>(() => {
   const s = printerAttention.value.severity
