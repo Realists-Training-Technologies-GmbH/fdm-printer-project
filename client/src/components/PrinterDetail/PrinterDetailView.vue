@@ -2609,9 +2609,12 @@ async function cancelTransfer() {
     cancelDispatchInFlight.value = false
   }
 }
-const isUnderMaintenance = computed(
-  () => !printer.value?.enabled && !!printer.value?.disabledReason,
-)
+// `disabledReason` is the canonical maintenance signal (mirrored from the
+// active maintenance log) — the same one the grid tile keys "Maintenance" off.
+// Starting maintenance sets disabledReason but does NOT flip `enabled`, so the
+// old `!enabled && disabledReason` check was never true during maintenance and
+// silently disabled the maintenance UI (block, tab default, tone, toggle).
+const isUnderMaintenance = computed(() => !!printer.value?.disabledReason)
 
 // Under maintenance the Print section is blocked, so default the view to the
 // Maintenance tab — and switch to it if maintenance starts while viewing.
