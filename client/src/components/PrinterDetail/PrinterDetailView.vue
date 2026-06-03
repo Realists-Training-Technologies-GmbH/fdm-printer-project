@@ -507,17 +507,28 @@
                          of the hero. Frees the body to use the full
                          card width for the filename. -->
                     <div class="pdv-hero__actionbar">
-                      <v-btn
-                        size="small"
-                        variant="flat"
-                        color="success"
-                        prepend-icon="play_arrow"
-                        :disabled="!isOnline || !isOperational || queueProcessingNext || queue[0].status === 'STARTING'"
-                        :loading="queueProcessingNext"
-                        @click="processNextInQueue"
-                      >
-                        Send to print
-                      </v-btn>
+                      <!-- Wrap the button so the tooltip has a non-disabled
+                           activator: a disabled v-btn swallows pointer events
+                           and would never surface the reason it's blocked. -->
+                      <span style="display: inline-flex">
+                        <v-btn
+                          size="small"
+                          variant="flat"
+                          color="success"
+                          prepend-icon="play_arrow"
+                          :disabled="!!sendToPrintDisabledReason"
+                          :loading="queueProcessingNext"
+                          @click="processNextInQueue"
+                        >
+                          Send to print
+                        </v-btn>
+                        <v-tooltip
+                          v-if="sendToPrintDisabledReason"
+                          activator="parent"
+                          location="top"
+                          :text="sendToPrintDisabledReason"
+                        />
+                      </span>
                     </div>
                   </article>
 
@@ -2083,11 +2094,18 @@ async function toggleMaintenance() {
 
 async function processNextInQueue() {
   if (!props.printerId || queueProcessingNext.value) return
+  // Capture the head before dispatch — loadQueue() will have advanced it
+  // by the time we confirm to the operator which file went out.
+  const head = queue.value[0]
   queueProcessingNext.value = true
   try {
     await PrintQueueService.processQueue(props.printerId)
     await loadQueue()
     notifyPrintJobsChanged({ printerId: props.printerId, reason: 'detailview:processNext' })
+    snackbar.openInfoMessage({
+      title: 'Sent to printer',
+      subtitle: head ? displayQueueName(head) : null,
+    })
   } catch (e: any) {
     snackbar.openErrorMessage({
       title: 'Could not start next job',
@@ -2103,6 +2121,15 @@ async function processNextInQueue() {
 const removingQueueId = ref<number | null>(null)
 async function removeFromQueue(job: QueuedJob) {
   if (!props.printerId) return
+  const ok = await confirmDialog({
+    title: 'Remove from queue?',
+    message: `"${displayQueueName(job)}" will be removed from this printer's queue.`,
+    hint: 'The file stays in storage — you can re-queue it later.',
+    confirmText: 'Remove',
+    severity: 'warning',
+    icon: 'close',
+  })
+  if (!ok) return
   removingQueueId.value = job.id
   try {
     await PrintQueueService.removeFromQueue(props.printerId, job.id)
@@ -2304,6 +2331,21 @@ const isOperational = computed(() => !!flags.value?.operational)
 const isStoppable = computed(
   () => !!(flags.value?.printing || flags.value?.paused || flags.value?.pausing),
 )
+
+// Centralised gate for the "Send to print" dispatch button. Returns the
+// human-readable reason it's blocked, or '' when it's clickable. Dispatch
+// is manual (the operator clears the bed between prints), so we explicitly
+// refuse to send the next job while a print is already running/paused —
+// otherwise the button stays live mid-print and invites a double-dispatch.
+const sendToPrintDisabledReason = computed(() => {
+  if (!isOnline.value) return 'Printer is offline'
+  if (queueProcessingNext.value) return 'Sending…'
+  if (queue.value[0]?.status === 'STARTING') return 'Transferring file…'
+  if (isPrinting.value || isPaused.value)
+    return 'Printer is busy — wait for the current print to finish and clear the bed'
+  if (!isOperational.value) return 'Printer is not ready'
+  return ''
+})
 const isUnderMaintenance = computed(
   () => !printer.value?.enabled && !!printer.value?.disabledReason,
 )
