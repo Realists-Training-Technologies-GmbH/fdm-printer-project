@@ -1967,7 +1967,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useQuery } from '@tanstack/vue-query'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { usePrinterStore } from '@/store/printer.store'
 import { usePrinterStateStore } from '@/store/printer-state.store'
 import { PrintJobService, PrintJobDto } from '@/backend/print-job.service'
@@ -1981,7 +1981,8 @@ import { CameraStreamService } from '@/backend/camera-stream.service'
 import type { CameraStream } from '@/models/camera-streams/camera-stream'
 import type { PrinterMaintenanceLog } from '@/models/printers/printer-maintenance-log.model'
 import type { FilesDto, FileDto } from '@/models/printers/printer-file.model'
-import { usePrinterTileThumbnailQuery } from '@/queries/printer-tile-thumbnail.query'
+import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
+import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { interpretStates } from '@/shared/printer-state.constants'
 import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
@@ -2712,6 +2713,19 @@ const bedTempStr = computed(() => {
 const printerIdRef = computed(() => props.printerId)
 const { data: thumbnailRecord } = usePrinterTileThumbnailQuery(printerIdRef)
 const thumbnail = computed(() => thumbnailRecord.value?.thumbnailBase64 ?? '')
+
+// Refetch the thumbnail when the server signals it changed (a new print
+// just started). Mirrors PrinterGridTile — without this the TanStack cache
+// stays pinned to the previous print's preview until window focus / staleTime,
+// which is why the thumbnail looked "stuck" until a full page reload.
+const thumbnailQueryClient = useQueryClient()
+useOnPrinterThumbnailChanged((event) => {
+  if (event.printerId === props.printerId) {
+    void thumbnailQueryClient.invalidateQueries({
+      queryKey: [printerTileThumbnailQueryKey, printerIdRef],
+    })
+  }
+})
 // Slice-time metadata of the file the printer is currently running.
 // Pulled from the same enriched thumbnail endpoint so we don't double
 // up the request — the data is already in TanStack's cache.
