@@ -14,6 +14,7 @@ import { useDebugSocketStore } from "@/store/debug-socket.store";
 import { useOverlayStore } from "@/store/overlay.store";
 import { notifyPrinterThumbnailChanged } from "@/shared/printer-thumbnail-invalidator.composable";
 import { notifyIntakeChanged } from "@/shared/intake-invalidator.composable";
+import { notifyPrintJobsChanged } from "@/shared/print-jobs-invalidator.composable";
 import { refreshIntakePendingCount } from "@/shared/intake-count.composable";
 import { useBrowserNotifications } from "@/shared/notifications.composable";
 
@@ -29,7 +30,7 @@ enum IO_MESSAGES {
 }
 
 interface QueueEventPayload {
-  kind: "submitted" | "failed";
+  kind: "submitted" | "failed" | "waiting";
   printerId?: number;
   jobId?: number;
   reason?: string;
@@ -291,6 +292,11 @@ export class SocketIoService {
       const printerLabel = data.printerId
         ? this.printerStore.printer(data.printerId)?.name ?? `printer ${data.printerId}`
         : "printer";
+      // Every queue transition (submitted / failed / waiting) changes a job's
+      // status server-side. Invalidate so views reload — otherwise a failed
+      // dispatch leaves its job stuck showing "STARTING / transferring" in the
+      // UI even though the server already rolled it back to QUEUED.
+      notifyPrintJobsChanged({ printerId: data.printerId, reason: `socket:queue:${data.kind}` });
       if (data.kind === "failed") {
         if (data.cancelled) {
           // Cancel-by-user is informational, not an error. Match the
@@ -315,6 +321,15 @@ export class SocketIoService {
       } else if (data.kind === "submitted") {
         this.snackbar.openInfoMessage({
           title: `Dispatched job to ${printerLabel}`,
+        });
+      } else if (data.kind === "waiting") {
+        // The dispatch is parked waiting for the printer to leave its post-cancel
+        // STOPPED sequence (the MK3 takes tens of seconds). Tell the user it's
+        // working, not hung, so they don't cancel and restart the churn.
+        this.snackbar.openInfoMessage({
+          title: `${printerLabel} is finishing the previous stop`,
+          subtitle: "The print will start automatically once it's ready — no need to cancel.",
+          warning: true,
         });
       }
     });

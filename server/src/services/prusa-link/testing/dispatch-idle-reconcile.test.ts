@@ -81,3 +81,68 @@ describe("ensurePrinterIdle — live-state reconciliation (Capa B)", () => {
     await expect(ensureIdle(queue)).rejects.toThrow(/busy/i);
   });
 });
+
+/**
+ * waitForPrinterReady: the Einsy MK3 lingers in STOPPED for tens of seconds
+ * after a cancel; a print started in that window preheats but never runs. The
+ * dispatch must wait for a genuinely ready state (READY/IDLE/FINISHED — NOT
+ * STOPPED) before touching the printer.
+ */
+describe("waitForPrinterReady — don't start a print while the printer is finishing a stop", () => {
+  let h: TrackingHarness;
+  beforeEach(async () => {
+    h = await createTrackingHarness();
+  });
+  afterEach(async () => {
+    await h.destroy();
+  });
+
+  const waitReady = (
+    queue: ReturnType<TrackingHarness["makePrintQueueService"]>,
+    opts?: { timeoutMs?: number; pollMs?: number },
+  ) => (queue as any).waitForPrinterReady(PRINTER_ID, undefined, opts) as Promise<void>;
+
+  it("returns immediately when the printer reads IDLE", async () => {
+    const queue = h.makePrintQueueService();
+    await h.seedLiveState(new PrusaBuddySimulator().idle(), PRINTER_ID);
+    await expect(waitReady(queue, { timeoutMs: 200, pollMs: 5 })).resolves.toBeUndefined();
+  });
+
+  it("fails open (returns) when there is no fresh live state — never block on an unobservable printer", async () => {
+    const queue = h.makePrintQueueService();
+    // No seedLiveState → unknown state → proceed rather than hang.
+    await expect(waitReady(queue, { timeoutMs: 200, pollMs: 5 })).resolves.toBeUndefined();
+  });
+
+  it("throws once the timeout elapses while the printer is still STOPPED", async () => {
+    const queue = h.makePrintQueueService();
+    await h.seedLiveState(new PrusaBuddySimulator().cancel({ clearJob: true }), PRINTER_ID);
+    await expect(waitReady(queue, { timeoutMs: 60, pollMs: 10 })).rejects.toThrow(/finishing the previous stop/i);
+  });
+
+  it("fires onWaiting exactly once while the printer is STOPPED (UI can show the hold)", async () => {
+    const queue = h.makePrintQueueService();
+    await h.seedLiveState(new PrusaBuddySimulator().cancel({ clearJob: true }), PRINTER_ID);
+    let waits = 0;
+    await expect(
+      (queue as any).waitForPrinterReady(PRINTER_ID, undefined, {
+        timeoutMs: 60,
+        pollMs: 10,
+        onWaiting: () => {
+          waits++;
+        },
+      }),
+    ).rejects.toThrow();
+    expect(waits).toBe(1); // once, not once-per-poll
+  });
+
+  it("resolves once the printer leaves STOPPED for IDLE", async () => {
+    const queue = h.makePrintQueueService();
+    await h.seedLiveState(new PrusaBuddySimulator().cancel({ clearJob: true }), PRINTER_ID);
+    const p = waitReady(queue, { timeoutMs: 2000, pollMs: 10 });
+    // The stop sequence finishes a few poll cycles later.
+    await new Promise((r) => setTimeout(r, 40));
+    await h.seedLiveState(new PrusaBuddySimulator().idle(), PRINTER_ID);
+    await expect(p).resolves.toBeUndefined();
+  });
+});

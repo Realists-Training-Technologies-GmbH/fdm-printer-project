@@ -429,6 +429,14 @@ export class PrintQueueService implements IPrintQueueService {
     }
   }
 
+  // True when a failed upload was rejected because the printer's single
+  // transfer slot was already busy (a stuck leftover from a cancelled upload).
+  // PrusaLinkApi tags those with `code: "transfer-conflict"` on the wrapped
+  // ExternalServiceError (whose payload lives at `.error`).
+  private isTransferConflictError(error: unknown): boolean {
+    return (error as { error?: { code?: string } })?.error?.code === "transfer-conflict";
+  }
+
   async resetStrandedDispatches(): Promise<number> {
     const stranded = await this.printJobRepository.find({ where: { status: "STARTING" } });
     if (stranded.length === 0) return 0;
@@ -610,6 +618,75 @@ export class PrintQueueService implements IPrintQueueService {
     }
   }
 
+  // Live states that mean "ready to accept a new print". Deliberately excludes
+  // STOPPED: unlike LIVE_IDLE_STATES (which treats STOPPED as "done, clear the
+  // stale DB row"), a printer mid-stop-sequence will NOT start a fresh print —
+  // it preheats and aborts. So for *starting* a print, STOPPED means "wait".
+  private static readonly DISPATCH_READY_STATES = new Set(["READY", "IDLE", "FINISHED"]);
+  // How long to wait for the printer to leave STOPPED before giving up. The
+  // Einsy MK3's stop sequence runs tens of seconds; 90s leaves comfortable
+  // headroom without wedging a genuinely stuck printer forever.
+  private static readonly DISPATCH_WAIT_TIMEOUT_MS = 90_000;
+  private static readonly DISPATCH_WAIT_POLL_MS = 2_500;
+
+  /**
+   * Block until the printer is genuinely ready to *start* a print.
+   *
+   * After a cancel the Einsy MK3 lingers in STOPPED for tens of seconds; a
+   * print uploaded+started in that window never runs (preheats, flickers
+   * PRINTING with no job, aborts to IDLE — verified on hardware). We poll the
+   * live state and only return once it reads READY/IDLE/FINISHED.
+   *
+   * Fail-open: an unknown/stale reading (offline, never polled, non-PrusaLink)
+   * returns immediately so we never block on a printer we can't observe — the
+   * upload itself will surface any real error. Returns early if the dispatch is
+   * cancelled mid-wait. Throws once the timeout elapses while still STOPPED.
+   */
+  private async waitForPrinterReady(
+    printerId: number,
+    signal?: AbortSignal,
+    opts: { timeoutMs?: number; pollMs?: number; onWaiting?: (state: string) => void } = {},
+  ): Promise<void> {
+    const timeoutMs = opts.timeoutMs ?? PrintQueueService.DISPATCH_WAIT_TIMEOUT_MS;
+    const pollMs = opts.pollMs ?? PrintQueueService.DISPATCH_WAIT_POLL_MS;
+    const deadline = Date.now() + timeoutMs;
+    let announcedWaiting = false;
+    for (;;) {
+      if (signal?.aborted) return;
+      const state = await this.getFreshLiveState(printerId);
+      if (!state || PrintQueueService.DISPATCH_READY_STATES.has(state)) return;
+      // First time we find the printer not-ready, tell the caller so the UI can
+      // explain the hold instead of looking hung. Fired once, not per poll.
+      if (!announcedWaiting) {
+        announcedWaiting = true;
+        opts.onWaiting?.(state);
+      }
+      if (Date.now() >= deadline) {
+        throw new BadRequestException(
+          `Printer ${printerId} is still finishing the previous stop (state ${state}) and isn't ready ` +
+            `to start a new print yet. Wait a few seconds and try again.`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  /**
+   * Surface a dispatch that's parked waiting for the printer to become ready.
+   * Best-effort: persists a human statusReason on the STARTING row so the queue
+   * list explains the hold, and fans out a `jobWaiting` event so the client can
+   * toast "the print will start on its own — don't cancel". Never throws — a
+   * failure here must not abort the dispatch it's only annotating.
+   */
+  private announceDispatchWaiting(printerId: number, jobId: number): void {
+    const reason = "Waiting for the printer to finish the previous stop — the print will start on its own.";
+    this.logger.log(`Job ${jobId} dispatch is waiting for printer ${printerId} to become ready (announcing to UI)`);
+    void this.printJobRepository
+      .update({ id: jobId, status: "STARTING" }, { statusReason: reason })
+      .catch(() => undefined);
+    this.eventEmitter2.emit("printQueue.jobWaiting", { printerId, jobId, reason });
+  }
+
   private ensurePrinterAssignment(job: PrintJob, printerId: number): void {
     if (!job.printerId) {
       job.printerId = printerId;
@@ -769,6 +846,16 @@ export class PrintQueueService implements IPrintQueueService {
         job.statusReason = `Print submission failed: ${this.extractFriendlyError(error)}`;
       }
       await this.printJobRepository.save(job);
+
+      // A transfer-conflict 409 means a previous (cancelled) upload left the
+      // printer's single transfer slot locked. Abort it so the slot frees and
+      // the printer's live `status.transfer` clears — otherwise the UI keeps
+      // showing a phantom "uploading" and the next retry just 409s again.
+      if (!wasCancelled && this.isTransferConflictError(error)) {
+        this.logger.log(`Job ${jobId} hit a stuck transfer slot on printer ${printerId}; aborting it to recover`);
+        void this.abortPrinterTransfer(printerId);
+      }
+
       if (wasCancelled) {
         this.logger.log(`Dispatch of job ${jobId} to printer ${printerId} cancelled by user`);
       } else {
@@ -862,6 +949,17 @@ export class PrintQueueService implements IPrintQueueService {
   private async dispatchToPrinter(printerId: number, job: PrintJob, signal?: AbortSignal): Promise<void> {
     const printerApi = this.printerApiFactory.getById(printerId);
     const fileName = job.fileName;
+
+    // The Einsy MK3 sits in STOPPED for tens of seconds after a cancel while it
+    // finishes its stop sequence. A print sent during that window uploads but
+    // never actually starts — the firmware preheats, briefly flickers PRINTING
+    // with no job, then aborts back to IDLE (reproduced on hardware). Wait for a
+    // genuinely ready state before touching the printer. No-op when it's already
+    // idle (first poll passes immediately). When it does have to wait, surface
+    // it so the queue UI shows "waiting for the printer" instead of looking hung.
+    await this.waitForPrinterReady(printerId, signal, {
+      onWaiting: () => this.announceDispatchWaiting(printerId, job.id),
+    });
 
     if (job.usbFilePath) {
       // File already lives on the printer's storage — just tell the firmware

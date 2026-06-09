@@ -774,6 +774,9 @@ export class PrusaLinkApi implements IPrinterApi {
       // Translate common PrusaLink upload failures into actionable messages.
       const status = (e as AxiosError)?.response?.status;
       let friendly = e?.message ?? "Upload failed";
+      // Set when the 409 is a "another transfer already in progress" conflict
+      // (a stuck slot), so the caller can clear it instead of just reporting.
+      let transferConflict = false;
       if (status === 401) {
         friendly = "PrusaLink rejected the upload: invalid username or password.";
       } else if (status === 409) {
@@ -784,11 +787,11 @@ export class PrusaLinkApi implements IPrinterApi {
         // was refused. Tell them apart from the error body so the operator
         // gets an actionable message instead of a misleading "file exists".
         const d = (data ?? {}) as { title?: string; message?: string; url?: string };
-        const isTransferConflict =
+        transferConflict =
           (typeof d.url === "string" && d.url.includes("transfer-conflict")) ||
           /transfer/i.test(d.title ?? "") ||
           /one file at (a )?time/i.test(d.message ?? "");
-        friendly = isTransferConflict
+        friendly = transferConflict
           ? "PrusaLink is busy with another transfer (it allows only one at a time). If you just cancelled an upload, the printer can take a few seconds to release the slot — wait a moment and retry."
           : "PrusaLink rejected the upload: a file with that name already exists and overwrite was refused.";
       } else if (status === 413) {
@@ -803,6 +806,9 @@ export class PrusaLinkApi implements IPrinterApi {
         {
           error: friendly,
           statusCode: status,
+          // Machine-readable tag so the dispatch layer can react to a stuck
+          // transfer slot (abort it) rather than only surfacing the message.
+          code: transferConflict ? "transfer-conflict" : undefined,
           data,
           success: false,
           stack: e?.stack,
