@@ -400,7 +400,33 @@ export class PrintQueueService implements IPrintQueueService {
     if (!controller) return false;
     controller.abort();
     this.logger.log(`Cancelled in-flight dispatch for printer ${printerId} on user request`);
+    // Aborting the controller only stops *us* streaming bytes; the printer
+    // keeps its transfer slot open and (on the legacy Einsy MK3) rejects the
+    // next dispatch with `409 Already in transfer process`. Tell the printer
+    // to abort its half-received transfer so the slot frees immediately.
+    // Best-effort and fire-and-forget — the cancel itself already succeeded.
+    void this.abortPrinterTransfer(printerId);
     return true;
+  }
+
+  /**
+   * Ask the printer to abort its in-flight transfer, releasing the slot a
+   * cancelled upload would otherwise leave locked. Best-effort: not every
+   * firmware exposes the endpoint, and a failure here must not turn a
+   * successful local cancel into an error.
+   */
+  private async abortPrinterTransfer(printerId: number): Promise<void> {
+    try {
+      const printerApi = this.printerApiFactory.getById(printerId);
+      if (typeof printerApi.abortTransfer === "function") {
+        await printerApi.abortTransfer();
+        this.logger.log(`Asked printer ${printerId} to abort its in-flight transfer`);
+      }
+    } catch (e) {
+      this.logger.warn(
+        `Could not abort transfer on printer ${printerId} (continuing): ${e instanceof Error ? e.message : e}`,
+      );
+    }
   }
 
   async resetStrandedDispatches(): Promise<number> {

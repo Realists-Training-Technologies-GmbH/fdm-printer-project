@@ -41,6 +41,19 @@ export interface PrusaLinkCurrentPayload {
  * original adapter did. That is safe because `printerState` is a fresh response
  * object per poll.
  */
+/**
+ * Coerce a PrusaLink `transfer.progress` into a 0–1 fraction.
+ *
+ * The Einsy MK3 reports a 0–100 percentage (verified on hardware); Buddy may
+ * report either, so treat anything >1 as a percentage and divide it back, while
+ * leaving an already-fractional value alone. Result is clamped to [0, 1].
+ */
+export function normalizeProgressFraction(progress: number): number {
+  if (!Number.isFinite(progress) || progress <= 0) return 0;
+  const fraction = progress > 1 ? progress / 100 : progress;
+  return Math.min(1, fraction);
+}
+
 export function normalizePrusaLinkPoll(
   printerState: PL_PrinterStateDto,
   jobState: PL_JobStateDto,
@@ -97,7 +110,14 @@ export function normalizePrusaLinkPoll(
   const transfer = status?.transfer
     ? {
         id: status.transfer.id,
-        progress: status.transfer.progress,
+        // Normalise to a 0–1 fraction (the app's internal contract). PrusaLink
+        // firmwares report `transfer.progress` on different scales: the legacy
+        // Einsy MK3 sends a 0–100 percentage (verified on hardware: 3.97, 13.02,
+        // …), so passing it through verbatim made the UI — which expects 0–1 —
+        // reject every value > 1 and show no number. Divide a percentage back to
+        // a fraction; leave an already-fractional value (≤1) untouched. Clamped
+        // so a stray reading can't push the bar past 100%.
+        progress: normalizeProgressFraction(status.transfer.progress),
         bytes: status.transfer.data_transferred,
         timeTransferring: status.transfer.time_transferring,
       }

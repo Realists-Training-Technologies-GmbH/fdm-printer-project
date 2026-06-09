@@ -48,6 +48,7 @@ export class FakePrinterApi {
     createFolder: [] as string[],
     getFiles: [] as Array<{ recursive?: boolean; startDir?: string }>,
     deleteFile: [] as string[],
+    abortTransfer: 0,
   };
   /** Files the temp-folder sweep should find (default: none). */
   tempFiles: Array<{ path: string }> = [];
@@ -73,6 +74,9 @@ export class FakePrinterApi {
   }
   async deleteFile(path: string): Promise<void> {
     this.calls.deleteFile.push(path);
+  }
+  async abortTransfer(): Promise<void> {
+    this.calls.abortTransfer++;
   }
 }
 
