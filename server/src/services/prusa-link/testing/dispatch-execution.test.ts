@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { PrintJob } from "@/entities";
+import { ExternalServiceError } from "@/exceptions/runtime.exceptions";
 import {
   createTrackingHarness,
   FakePrinterApi,
@@ -110,6 +111,31 @@ describe("dispatch execution — upload, retry, cancel", () => {
     expect(after?.statusReason).toMatch(/failed/i);
     expect(api.calls.uploadFile).toHaveLength(1); // NOT retried
     expect(failed[0]).toMatchObject({ cancelled: false });
+  });
+
+  it("aborts the stuck transfer slot when the upload 409s with a transfer conflict", async () => {
+    const api = new FakePrinterApi();
+    api.uploadBehavior = async () => {
+      // Mirrors PrusaLinkApi's tagged 409: a previous cancelled upload left the
+      // single transfer slot locked. The dispatch must free it so the live
+      // transfer (and the UI's phantom "uploading") clears and a retry works.
+      throw new ExternalServiceError(
+        {
+          error: "PrusaLink is busy with another transfer",
+          statusCode: 409,
+          code: "transfer-conflict",
+          success: false,
+        },
+        "Prusa-Link",
+      );
+    };
+    const queue = h.makePrintQueueService({ printerApi: api });
+    const job = await startingJob();
+
+    await dispatch(queue, job.id);
+
+    expect(api.calls.abortTransfer).toBe(1); // freed the stuck slot
+    expect((await repo().findOneBy({ id: job.id }))?.status).toBe("QUEUED"); // rolled back for retry
   });
 
   it("retries a transient 5xx and succeeds on the next attempt", async () => {

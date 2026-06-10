@@ -126,6 +126,16 @@ export interface IPrinterApi {
 
   uploadFile(input: UploadFileInput): Promise<void>;
 
+  /**
+   * Abort the in-flight file transfer on the printer side. Aborting the
+   * local upload stream only stops *us* sending bytes; some firmwares
+   * (notably the legacy Einsy MK3) keep their single transfer slot locked
+   * afterwards and reject the next upload with `409 Already in transfer
+   * process`. Implementations should clear that slot best-effort. Optional
+   * because not every firmware exposes a transfer-abort endpoint.
+   */
+  abortTransfer?(): Promise<void>;
+
   deleteFile(path: string): Promise<void>;
 
   deleteFolder(path: string): Promise<void>;

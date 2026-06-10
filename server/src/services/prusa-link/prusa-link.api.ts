@@ -774,10 +774,26 @@ export class PrusaLinkApi implements IPrinterApi {
       // Translate common PrusaLink upload failures into actionable messages.
       const status = (e as AxiosError)?.response?.status;
       let friendly = e?.message ?? "Upload failed";
+      // Set when the 409 is a "another transfer already in progress" conflict
+      // (a stuck slot), so the caller can clear it instead of just reporting.
+      let transferConflict = false;
       if (status === 401) {
         friendly = "PrusaLink rejected the upload: invalid username or password.";
       } else if (status === 409) {
-        friendly = "PrusaLink rejected the upload: a file with that name already exists and overwrite was refused.";
+        // A 409 here has two distinct causes. The printer is busy with
+        // another transfer (only one at a time — common right after a
+        // cancelled upload, especially on the legacy Einsy MK3 which is slow
+        // to release the slot), or a same-named file exists and overwrite
+        // was refused. Tell them apart from the error body so the operator
+        // gets an actionable message instead of a misleading "file exists".
+        const d = (data ?? {}) as { title?: string; message?: string; url?: string };
+        transferConflict =
+          (typeof d.url === "string" && d.url.includes("transfer-conflict")) ||
+          /transfer/i.test(d.title ?? "") ||
+          /one file at (a )?time/i.test(d.message ?? "");
+        friendly = transferConflict
+          ? "PrusaLink is busy with another transfer (it allows only one at a time). If you just cancelled an upload, the printer can take a few seconds to release the slot — wait a moment and retry."
+          : "PrusaLink rejected the upload: a file with that name already exists and overwrite was refused.";
       } else if (status === 413) {
         friendly = "PrusaLink rejected the upload: file is larger than the printer storage allows.";
       } else if (status === 415) {
@@ -790,6 +806,9 @@ export class PrusaLinkApi implements IPrinterApi {
         {
           error: friendly,
           statusCode: status,
+          // Machine-readable tag so the dispatch layer can react to a stuck
+          // transfer slot (abort it) rather than only surfacing the message.
+          code: transferConflict ? "transfer-conflict" : undefined,
           data,
           success: false,
           stack: e?.stack,
@@ -797,6 +816,18 @@ export class PrusaLinkApi implements IPrinterApi {
         "Prusa-Link",
       );
     }
+  }
+
+  /**
+   * Abort the printer's current file transfer (PrusaLink Web API v1:
+   * `DELETE /api/v1/transfer`). Returns 204 even when nothing is in flight,
+   * so it's safe to call unconditionally. This releases the single transfer
+   * slot that the legacy Einsy MK3 otherwise keeps locked after a cancelled
+   * upload — without it the next dispatch fails with `409 Already in
+   * transfer process / Only one file at time can be transferred`.
+   */
+  async abortTransfer(): Promise<void> {
+    await this.client.delete<void>("/api/v1/transfer");
   }
 
   async deleteFile(path: string): Promise<void> {

@@ -1967,7 +1967,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useQuery } from '@tanstack/vue-query'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { usePrinterStore } from '@/store/printer.store'
 import { usePrinterStateStore } from '@/store/printer-state.store'
 import { PrintJobService, PrintJobDto } from '@/backend/print-job.service'
@@ -1981,13 +1981,14 @@ import { CameraStreamService } from '@/backend/camera-stream.service'
 import type { CameraStream } from '@/models/camera-streams/camera-stream'
 import type { PrinterMaintenanceLog } from '@/models/printers/printer-maintenance-log.model'
 import type { FilesDto, FileDto } from '@/models/printers/printer-file.model'
-import { usePrinterTileThumbnailQuery } from '@/queries/printer-tile-thumbnail.query'
+import { usePrinterTileThumbnailQuery, printerTileThumbnailQueryKey } from '@/queries/printer-tile-thumbnail.query'
+import { useOnPrinterThumbnailChanged } from '@/shared/printer-thumbnail-invalidator.composable'
 import { interpretStates } from '@/shared/printer-state.constants'
 import { useDialog } from '@/shared/dialog.composable'
 import { DialogName } from '@/components/Generic/Dialogs/dialog.constants'
 import { useSnackbar } from '@/shared/snackbar.composable'
 import { confirm as confirmDialog } from '@/shared/confirm-dialog.composable'
-import { notifyPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
+import { notifyPrintJobsChanged, useOnPrintJobsChanged } from '@/shared/print-jobs-invalidator.composable'
 import { derivePrinterAttention } from '@/shared/printer-attention.util'
 import { displayFileName } from '@/utils/file-name.util'
 import { apiErrorMessage } from '@/utils/error.utils'
@@ -2530,6 +2531,11 @@ const sendToPrintDisabledReason = computed(() => {
   if (dispatchSettling.value) return 'Print is starting…'
   if (isPrinting.value || isPaused.value)
     return 'Printer is busy — wait for the current print to finish and clear the bed'
+  // After a cancel the MK3 lingers in STOPPED for tens of seconds while it
+  // finishes its stop sequence (it physically won't start a new print until
+  // it's back to IDLE — it would just preheat and never run). Block the button
+  // until it's ready; it re-enables on its own once the live state clears.
+  if (flags.value?.cancelling) return 'Printer is finishing the previous stop — available in a moment'
   if (!isOperational.value) return 'Printer is not ready'
   return ''
 })
@@ -2712,6 +2718,19 @@ const bedTempStr = computed(() => {
 const printerIdRef = computed(() => props.printerId)
 const { data: thumbnailRecord } = usePrinterTileThumbnailQuery(printerIdRef)
 const thumbnail = computed(() => thumbnailRecord.value?.thumbnailBase64 ?? '')
+
+// Refetch the thumbnail when the server signals it changed (a new print
+// just started). Mirrors PrinterGridTile — without this the TanStack cache
+// stays pinned to the previous print's preview until window focus / staleTime,
+// which is why the thumbnail looked "stuck" until a full page reload.
+const thumbnailQueryClient = useQueryClient()
+useOnPrinterThumbnailChanged((event) => {
+  if (event.printerId === props.printerId) {
+    void thumbnailQueryClient.invalidateQueries({
+      queryKey: [printerTileThumbnailQueryKey, printerIdRef],
+    })
+  }
+})
 // Slice-time metadata of the file the printer is currently running.
 // Pulled from the same enriched thumbnail endpoint so we don't double
 // up the request — the data is already in TanStack's cache.
@@ -3619,6 +3638,15 @@ watch(
     if (props.printerId) void loadQueue()
   },
 )
+
+// Reload the queue when the server signals a dispatch transition (job
+// submitted / failed / waiting), fanned out over the socket as a
+// print-jobs-changed event. Without this a *failed* dispatch leaves the head
+// job stuck showing "transferring" here even though the server already rolled
+// it back to QUEUED.
+useOnPrintJobsChanged((e) => {
+  if (!e.printerId || e.printerId === props.printerId) void loadQueue()
+})
 
 // ── Formatters ──
 function formatDuration(seconds: number | null | undefined): string {

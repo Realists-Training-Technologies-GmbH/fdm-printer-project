@@ -43,6 +43,9 @@ export class SocketIoTask {
     this.eventEmitter2.on("printQueue.jobSubmissionFailed", (data) =>
       this.socketIoGateway.send(IO_MESSAGES.QueueEvent, { kind: "failed", ...data }),
     );
+    this.eventEmitter2.on("printQueue.jobWaiting", (data) =>
+      this.socketIoGateway.send(IO_MESSAGES.QueueEvent, { kind: "waiting", ...data }),
+    );
     this.eventEmitter2.on("printer.thumbnailChanged", (data) =>
       this.socketIoGateway.send(IO_MESSAGES.PrinterThumbnailChanged, data),
     );

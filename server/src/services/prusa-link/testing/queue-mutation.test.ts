@@ -63,6 +63,24 @@ describe("queue mutation aborts in-flight transfers (no surprise print on an unc
     expect(api.calls.uploadFile).toHaveLength(1); // upload was attempted then aborted
   });
 
+  it("cancelDispatch also tells the printer to abort its transfer (frees the MK3's locked slot)", async () => {
+    // Aborting the local stream isn't enough: the legacy Einsy MK3 keeps its
+    // single transfer slot open and 409s the next dispatch. cancelDispatch
+    // must call the printer's abortTransfer to release it.
+    const api = abortableApi();
+    const queue = h.makePrintQueueService({ printerApi: api });
+    const job = await startingMidUpload();
+
+    const p = (queue as any).dispatchInBackground(PRINTER_ID, job.id) as Promise<void>;
+    await tick(); // reach uploadFile (now hanging on the abort signal)
+
+    expect(queue.cancelDispatch(PRINTER_ID)).toBe(true);
+    await p; // dispatch settles after the abort
+    await tick(); // let the fire-and-forget abortTransfer run
+
+    expect(api.calls.abortTransfer).toBe(1);
+  });
+
   it("clearQueue aborts the in-flight STARTING upload too", async () => {
     const api = abortableApi();
     const queue = h.makePrintQueueService({ printerApi: api });
