@@ -573,8 +573,10 @@ const currentJob = computed(() => {
 const currentProgress = computed(() => {
   if (!printerId.value) return undefined
 
+  // PrusaLink reports the job with `completion: null` in some states (e.g.
+  // ATTENTION); normalize to undefined so the template guards skip it.
   const job = currentJob.value
-  return job?.progress?.completion
+  return job?.progress?.completion ?? undefined
 })
 
 // Queue dispatch transfer progress for this printer. Populated server-side
